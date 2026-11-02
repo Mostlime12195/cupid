@@ -34,6 +34,7 @@ LÖVE on the web. Its latest release (11.4.1, 2022) ships LÖVE 11.4.
 | | love.js 11.4.1 | This project |
 | --- | --- | --- |
 | LÖVE version | 11.4 | 12.0 (current development branch) |
+| Lua speed | PUC Lua 5.1 interpreter | Same interpreter plus a Lua-to-WebAssembly JIT: 1.7–5.6× faster on Lua-heavy code (measured in V8) |
 | `love.thread` | Compatibility build: `Thread:start()` returns `false`. Threaded build: needs `SharedArrayBuffer`, i.e. COOP/COEP headers | Works on any host, no special headers (see below) |
 | Audio | Compatibility build: "dodgy audio" (its readme) | Streaming refilled from the frame loop and a timer; keeps playing in background tabs |
 | `bit` library (LuaJIT built-in) | Missing | Included (LuaBitOp), as a global and as `require "bit"` |
@@ -46,10 +47,36 @@ and `bit` rows were checked by running the same test game in both.
 
 ### Performance
 
-Measured with the same `.love` (a benchmark that runs unchanged on 11.4 and
-12) in the same Chrome instance, run back to back. Lower is better.
+**Lua-heavy code runs 1.7–5.6× faster than love.js** (code that mostly calls
+C library functions gains 10–20%), thanks to a JIT that compiles hot Lua
+functions to WebAssembly (see [The Lua JIT](#the-lua-jit)). Neither
+LuaJIT nor any other machine-code JIT can run in a browser, so love.js (and
+this project with `?jit=0`) interprets every Lua instruction.
 
-| Test (`tools/bench`) | love.js 11.4.1 | This project |
+Pure-Lua benchmark (`tools/jit/bench.lua`), median of 3 runs in V8 (Node
+26, same engine as Chrome), same build flags as the web build. "JIT off" is
+the plain PUC Lua 5.1 interpreter, which performs like love.js's (see the
+next table):
+
+| Test | JIT off | JIT on | Speedup |
+| --- | --- | --- | --- |
+| Mandelbrot 200×200 (float math loops) | 58.6 ms | 10.5 ms | 5.6× |
+| Update 10k particles (table fields) | 27.0 ms | 5.9 ms | 4.6× |
+| Sieve of Eratosthenes, 1M (array reads/writes) | 46.0 ms | 12.2 ms | 3.8× |
+| Recursive `fib(27)` (Lua calls) | 26.6 ms | 15.5 ms | 1.7× |
+| OOP with metatables, 300k objects | 115.0 ms | 97.2 ms | 1.2× |
+| String formatting and patterns | 29.5 ms | 25.5 ms | 1.2× |
+| Fill and `table.sort` 200k numbers | 39.8 ms | 36.1 ms | 1.1× |
+
+The last three spend most of their time in C library functions
+(`setmetatable`, `string.format`, `table.sort`) and allocation, which the
+JIT doesn't change.
+
+Against love.js, measured with the same `.love` (`tools/bench`, which runs
+unchanged on 11.4 and 12) in the same Chrome instance, back to back, before
+the JIT existed:
+
+| Test (`tools/bench`) | love.js 11.4.1 | This project, interpreter only |
 | --- | --- | --- |
 | Lua: recursive `fib(27)` | 11.9 ms | 11.7 ms |
 | Lua: fill and sort 200k-element table | 34.1 ms | 28.9 ms |
@@ -59,21 +86,39 @@ Measured with the same `.love` (a benchmark that runs unchanged on 11.4 and
 | CPU time to submit 20k sprites + 5k rectangles | 5.6 ms | 6.1 ms |
 | Page load to `love.load` (local server, cached) | 90 ms | 112 ms |
 
-This is one back-to-back run on an Apple Silicon Mac; other runs on the same
-machine varied by 10–20% while other work was running, so treat differences
-under ~15% as noise. The honest summary: CPU performance is on par with
-love.js, while running the much larger LÖVE 12 engine. The improvements over
-love.js are in what works (below), not raw speed.
+One back-to-back run on an Apple Silicon Mac; runs varied by 10–20% while
+other work was running, so treat differences under ~15% as noise. Reaching
+parity needed one fix: with link-time optimization, Lua's interpreter loop
+was inlined into the `setjmp`-protected function behind
+`pcall`/`coroutine.resume`, so every call paid for WebAssembly exception
+handling. `luaV_execute` is now kept out of line (`deps/lua-5.1.5/lvm.c`).
 
-Both run PUC Lua 5.1 (LuaJIT's JIT isn't possible in WebAssembly). One fix
-was needed to reach parity: with
-link-time optimization, Lua's interpreter loop was being inlined into the
-`setjmp`-protected function behind `pcall`/`coroutine.resume`, which made
-every call pay for WebAssembly exception handling. `luaV_execute` is now kept
-out of line (`deps/lua-5.1.5/lvm.c`).
+### Compared to desktop LÖVE
 
-Download size is larger, because LÖVE 12 itself is: it adds the glslang
-shader compiler, HarfBuzz text shaping and a Noto Sans default font.
+The same benchmark in the official macOS build of LÖVE 12 from the same
+upstream commit (`love2d/love` CI run for `ef388d4`), which uses LuaJIT with
+its JIT on, median of 3 runs:
+
+| Test | Desktop LÖVE 12 (LuaJIT) | This project (web, JIT on) |
+| --- | --- | --- |
+| Recursive `fib(27)` | 0.9 ms | 15.5 ms |
+| Fill and sort 200k numbers | 32.0 ms | 36.1 ms |
+| String formatting and patterns | 5.3 ms | 25.5 ms |
+| OOP with metatables, 300k objects | 10.9 ms | 97.2 ms |
+| `ImageData:mapPixel` on 512×512 | 0.3 ms | 9.0 ms (browser, no JIT) |
+| CPU time to submit 20k sprites + 5k rectangles | 14.1 ms (Metal) | 5.6–6.1 ms (WebGL 2) |
+
+LuaJIT's trace compiler is in a different league for pure Lua (10–17×
+faster on call- and allocation-heavy code); expect CPU-heavy Lua to need
+noticeably more headroom on the web. Engine-side work (drawing, physics,
+audio and image decoding) is the same C++ code on both, and drawing was
+actually cheaper on the web in this test, so games that spend their frame
+in LÖVE's C++ code rather than in Lua lose little. The web column for the
+Lua rows comes from the Node/V8 runs above, not from inside a browser.
+
+Download size is larger than love.js because LÖVE 12 itself is: it adds the
+glslang shader compiler, HarfBuzz text shaping, a Noto Sans default font,
+and here also Theora video.
 
 | | love.js 11.4.1 | This project |
 | --- | --- | --- |
@@ -99,6 +144,40 @@ Thread gets its own Lua state and runs as a coroutine on the main thread
 
 The trade-off: threads share one CPU core with the game, so they make
 blocking-style code work but don't add parallel speed.
+
+## The Lua JIT
+
+`deps/lua-5.1.5/ljit.inc` compiles a Lua function to a small WebAssembly
+module once it has been called, or has looped, 50 times. The browser then
+compiles that to machine code like any other wasm.
+
+- Lua values stay in the Lua stack, exactly where the interpreter keeps
+  them, so compiled code can be entered and left at any instruction: after
+  calls, when a coroutine resumes, from the middle of a hot loop, or to hand
+  a frame back to the interpreter when a debug hook is set.
+- Arithmetic, comparisons, numeric `for` loops, tests, moves, constants, and
+  reads and writes of table fields (constant string keys, hashed at compile
+  time) and array slots run inline. Everything that can involve metatables,
+  the GC, errors or calls goes to helpers that are copies of the
+  interpreter's own code, so behavior (including error messages) is
+  identical.
+- Compiled functions call other compiled functions directly, up to 64 deep.
+- Frames with a line or count hook are interpreted, so `debug.sethook` and
+  `love.thread`'s scheduler work unchanged.
+- `?jit=0` on the player turns it off.
+
+`tools/jit/` builds the standalone interpreter for Node and runs a
+differential test suite: every test must print exactly the same with the
+JIT off, compiling everything immediately, and with a mix of compiled and
+interpreted frames.
+
+```bash
+sh tools/jit/build-node.sh
+```
+
+```bash
+bash tools/jit/test.sh
+```
 
 ## Building
 
@@ -211,6 +290,7 @@ can be rebased onto newer LÖVE commits:
 - WebGL 2 differences: no texture swizzle (LA8 textures use
   `LUMINANCE_ALPHA`), no `GL_FRAMEBUFFER_SRGB` toggle.
 - `love.timer` uses `emscripten_get_now`; sleeping doesn't block.
+- A Lua-to-WebAssembly JIT (above), in `deps/lua-5.1.5/ljit.inc` with small hooks in `lvm.c`, `ldo.c` and `lfunc.c`.
 - Green threads for `love.thread` (above); audio streaming refills from the
   frame loop and a timer instead of a pool thread, and recovers from underruns.
 - `love.video` decodes Theora from the frame loop too, instead of its worker
