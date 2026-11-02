@@ -22,6 +22,10 @@
 #include "common/config.h"
 #include "System.h"
 
+#ifdef LOVE_EMSCRIPTEN
+#include <emscripten.h>
+#endif
+
 #if defined(LOVE_IOS)
 #include "common/ios.h"
 #elif defined(LOVE_ANDROID)
@@ -52,6 +56,8 @@ const char *System::getOS()
 	return "Android";
 #elif defined(LOVE_LINUX)
 	return "Linux";
+#elif defined(LOVE_EMSCRIPTEN)
+	return "Web";
 #else
 	return "Unknown";
 #endif
@@ -59,6 +65,9 @@ const char *System::getOS()
 
 void System::vibrate(double seconds) const
 {
+#ifdef LOVE_EMSCRIPTEN
+	EM_ASM({ if (navigator.vibrate) navigator.vibrate($0); }, (int) (seconds * 1000.0));
+#endif
 #ifdef LOVE_ANDROID
 	love::android::vibrate(seconds);
 #elif defined(LOVE_IOS)

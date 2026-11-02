@@ -258,7 +258,9 @@ void OpenGL::setupContext()
 	setEnableState(ENABLE_SCISSOR_TEST, state.enableState[ENABLE_SCISSOR_TEST]);
 	setEnableState(ENABLE_FACE_CULL, state.enableState[ENABLE_FACE_CULL]);
 
-	if (!bugs.brokenSRGB)
+	// GL_FRAMEBUFFER_SRGB can't be toggled on GLES/WebGL without the
+	// EXT_sRGB_write_control extension.
+	if (!bugs.brokenSRGB && (GLAD_VERSION_1_0 || GLAD_EXT_sRGB_write_control))
 		setEnableState(ENABLE_FRAMEBUFFER_SRGB, state.enableState[ENABLE_FRAMEBUFFER_SRGB]);
 	else
 		state.enableState[ENABLE_FRAMEBUFFER_SRGB] = false;
