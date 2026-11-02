@@ -437,6 +437,17 @@ bool Source::update()
 						break;
 				}
 
+#ifdef LOVE_EMSCRIPTEN
+				// Browsers throttle background tabs, so a stream can run out
+				// of queued buffers. OpenAL then stops the source; resume it
+				// once it has data again instead of going silent for good.
+				ALint state = AL_STOPPED, queued = 0;
+				alGetSourcei(source, AL_SOURCE_STATE, &state);
+				alGetSourcei(source, AL_BUFFERS_QUEUED, &queued);
+				if (state == AL_STOPPED && queued > 0)
+					alSourcePlay(source);
+#endif
+
 				return true;
 			}
 			return false;

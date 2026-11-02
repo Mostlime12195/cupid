@@ -358,10 +358,15 @@ void spawn(LuaThread *t, sdl::Thread *owner)
 	threads.push_back(g);
 }
 
-void runFrame(double budget)
+void runFrameTasks()
 {
 	for (auto &task : frameTasks)
 		task.second();
+}
+
+void runFrame(double budget)
+{
+	runFrameTasks();
 
 	if (threads.empty())
 		return;

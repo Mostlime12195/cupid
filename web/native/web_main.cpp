@@ -15,6 +15,7 @@
 #include <SDL3/SDL.h>
 #include <emscripten.h>
 #include <emscripten/html5.h>
+#include <emscripten/eventloop.h>
 
 #include <algorithm>
 #include <string>
@@ -158,6 +159,15 @@ void frame()
 	finish();
 }
 
+// requestAnimationFrame stops in background tabs but timers keep running
+// (and aren't throttled while a tab plays audio), so streaming audio is also
+// refilled from an interval.
+void audioPump(void *)
+{
+	if (L != nullptr)
+		love::thread::web::runFrameTasks();
+}
+
 } // anonymous namespace
 
 extern "C" {
@@ -192,6 +202,7 @@ int main(int argc, char **argv)
 	start();
 	// 0 fps = requestAnimationFrame; don't simulate an infinite loop so main
 	// returns and the JS side can continue.
+	emscripten_set_interval(audioPump, 50.0, nullptr);
 	emscripten_set_main_loop(frame, 0, false);
 	return 0;
 }

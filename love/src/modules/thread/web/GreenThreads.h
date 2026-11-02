@@ -66,6 +66,7 @@ void runFrame(double budget);
 // (e.g. refilling streaming audio buffers).
 int addFrameTask(std::function<void()> task);
 void removeFrameTask(int id);
+void runFrameTasks();
 
 // Blocking operations. Each pushes its Lua results (or yields) and returns
 // the value a lua_CFunction should return.
