@@ -216,6 +216,8 @@ can be rebased onto newer LÖVE commits:
 - `love.video` decodes Theora from the frame loop too, instead of its worker
   thread. libtheora's decoder is built from source (`deps/theora`, without
   its x86/ARM assembly); libogg is Emscripten's port.
+- A streaming Source seeked while paused or stopped no longer skips ahead
+  when played again (this showed up as a video with audio jumping ahead).
 - `boot.lua` skips modules the build doesn't include.
 - LuaBitOp (`deps/luabitop`) is loaded as the global `bit`, as on LuaJIT.
 - SDL3 text input is started when the window is created.

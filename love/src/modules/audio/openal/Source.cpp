@@ -880,6 +880,12 @@ void Source::prepareAtomic()
 	}
 
 	// Seek to the current/pending offset.
+#ifdef LOVE_EMSCRIPTEN
+	// A streaming Source's decoder is already at offsetSamples, so applying
+	// it to the queued buffers too skips ahead (Source:seek while paused or
+	// stopped, then play; e.g. seeking a paused Video with audio).
+	if (sourceType != TYPE_STREAM)
+#endif
 	alSourcei(source, AL_SAMPLE_OFFSET, offsetSamples);
 }
 
