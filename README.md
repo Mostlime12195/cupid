@@ -36,7 +36,6 @@ LÖVE on the web. Its latest release (11.4.1, 2022) ships LÖVE 11.4.
 | `bit` library (LuaJIT built-in) | Missing | Included (LuaBitOp), as a global and as `require "bit"` |
 | Memory | Grows, but the initial size must cover the game's assets (`-m`) | Grows as needed; nothing to configure |
 | Packaging | Node CLI builds a page and data package per game | Any `.love` file runs as is: by URL, drag and drop, or from the editor |
-| Resizable windows | | `t.window.resizable` games fill the page and get `love.resize` |
 | Editor | None | Built-in editor with run, console and export |
 
 The love.js entries come from its 11.4.1 npm package and readme. The threads
