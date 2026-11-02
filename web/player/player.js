@@ -20,6 +20,8 @@ const params = new URLSearchParams(location.search);
 const embedded = params.get('embed') === '1';
 const autoplay = embedded || params.get('autoplay') === '1';
 const scaleMode = params.get('scale') || document.querySelector('meta[name="love-scale"]')?.content || 'fit';
+// ?jit=0 runs all Lua in the interpreter (for comparison or debugging).
+const jitEnabled = params.get('jit') !== '0';
 const gameUrl = params.get('game') || document.querySelector('meta[name="love-game"]')?.content || null;
 
 const $ = (sel) => document.querySelector(sel);
@@ -271,6 +273,7 @@ async function start(game) {
   };
   new MutationObserver(onTitle).observe(document.head, { subtree: true, childList: true, characterData: true });
 
+  M._ljit_configure?.(jitEnabled ? 1 : 0, 0);
   try {
     M.callMain([arg]);
   } catch (e) {
