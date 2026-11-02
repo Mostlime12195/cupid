@@ -222,6 +222,10 @@ async function mountSaves(M) {
   window.addEventListener('pagehide', () => syncSaves(false));
 }
 
+// Load save data from IndexedDB as soon as the engine is ready, so it's done
+// by the time the player presses Play.
+const savesReady = engineReady.then(mountSaves);
+
 function writeFiles(M, files) {
   for (const [rawPath, data] of Object.entries(files)) {
     const path = `${GAME_DIR}/${rawPath.replace(/^\/+/, '')}`;
@@ -235,7 +239,7 @@ async function start(game) {
   if (running) return;
   showStatus('Starting…', { progress: null });
   const M = await engineReady;
-  await mountSaves(M);
+  await savesReady;
 
   let arg;
   if (game.love) {
