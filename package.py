@@ -61,7 +61,7 @@ def main():
     meta = (f'<meta name="love-game" content="game.love">\n'
             f'<meta name="love-scale" content="{args.scale}">\n')
     html = html.replace("<head>\n", "<head>\n" + meta, 1)
-    html = html.replace("<title>LÖVE Player</title>", f"<title>{title}</title>")
+    html = html.replace("<title>Smitten Player</title>", f"<title>{title}</title>")
     (args.out / "index.html").write_text(html)
 
     size = sum(f.stat().st_size for f in args.out.iterdir() if f.is_file())

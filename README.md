@@ -1,7 +1,11 @@
-# LÖVE 12 for the Web
+# Smitten
 
-The real [LÖVE](https://love2d.org) 12 engine compiled to WebAssembly, with a
-player for publishing games and a browser-based editor for making them.
+LÖVE 12 for the web: the real [LÖVE](https://love2d.org) 12 engine compiled
+to WebAssembly, with a player for publishing games and a browser-based editor
+for making them. Try the editor at
+<https://mostlime12195.github.io/smitten/>.
+
+Smitten is an independent project, not affiliated with the LÖVE team.
 
 This isn't a reimplementation of the LÖVE API. It's the upstream C++ engine
 (`love2d/love` main branch, 12.0 development) built with Emscripten, plus a
@@ -19,7 +23,7 @@ decoding, and save files.
 | `deps/theora/` | libtheora 1.2.0 decoder, for `love.video` |
 | `web/native/` | Web entry point (`web_main.cpp`) replacing LÖVE's blocking `main()` |
 | `web/player/` | The player page (standalone and embeddable) |
-| `web/editor/` | The editor (LÖVE Web Studio) |
+| `web/editor/` | The Smitten editor |
 | `web/examples/` | Example projects used by the editor |
 | `build.py` | Build script (reads source lists from `love/CMakeLists.txt`) |
 | `serve.py` | Local dev server |
@@ -248,7 +252,7 @@ which zips them on request and adds the routes the `https` test needs:
 http://localhost:8772/player.html?game=tools/https.love (or `smoke`,
 `filedialog`, `textinput`, ...).
 
-## The editor (LÖVE Web Studio)
+## The editor
 
 `dist/index.html`. Everything is stored in the browser (IndexedDB); nothing is
 uploaded anywhere.

@@ -1,4 +1,4 @@
-// LÖVE Web Studio: application glue.
+// Smitten editor: application glue.
 
 import {
   h, icon, hydrateIcons, openDialog, promptDialog, confirmDialog, showMenu, toast, downloadBlob, formatBytes, timeAgo, isMac,
@@ -114,7 +114,7 @@ async function init() {
     else {
       const p = await store.createProject('My First Game', BLANK.files);
       await openProject(p.id);
-      consolePanel.info('Welcome to LÖVE Web Studio! Press F5 to run, or open the project menu to try the examples.');
+      consolePanel.info('Welcome to Smitten! Press F5 to run, or open the project menu to try the examples.');
     }
   }
   window.addEventListener('hashchange', () => importShareHash().catch((e) => toast(e.message, { type: 'error' })));
@@ -154,7 +154,7 @@ async function openProject(id) {
 
   $('#project-name').textContent = project.name;
   $('#game-title').textContent = project.name;
-  document.title = `${project.name} · LÖVE Web Studio`;
+  document.title = `${project.name} · Smitten`;
   tree.setProject(id);
   await refreshEntries();
 
@@ -261,7 +261,7 @@ async function openProjectsDialog() {
           if (current) {
             state.project.name = name;
             $('#project-name').textContent = name;
-            document.title = `${name} · LÖVE Web Studio`;
+            document.title = `${name} · Smitten`;
           }
           projectList = await store.listProjects();
           renderList();
@@ -1242,5 +1242,5 @@ window.studio = {
 init().catch((e) => {
   console.error(e);
   $('#app').classList.remove('booting');
-  toast(`LÖVE Web Studio failed to start: ${e.message}`, { type: 'error', timeout: 10000 });
+  toast(`Smitten failed to start: ${e.message}`, { type: 'error', timeout: 10000 });
 });

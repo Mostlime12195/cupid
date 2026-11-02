@@ -1,4 +1,4 @@
-// LÖVE web player.
+// Smitten player.
 //
 // Standalone:  player.html?game=path/to/game.love   (or drop a .love on the page)
 // Embedded:    <iframe src="player.html?embed=1">, then postMessage
@@ -306,7 +306,7 @@ async function start(game) {
   const pageTitle = document.title;
   let lastTitle = '';
   const onTitle = () => {
-    if (document.title === 'Untitled' && pageTitle !== 'LÖVE Player') document.title = pageTitle;
+    if (document.title === 'Untitled' && pageTitle !== 'Smitten Player') document.title = pageTitle;
     if (document.title !== lastTitle) {
       lastTitle = document.title;
       post({ type: 'title', title: lastTitle });

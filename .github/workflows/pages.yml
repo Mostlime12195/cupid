@@ -1,0 +1,57 @@
+# Builds the engine from source and publishes dist/ (editor, player,
+# examples) to GitHub Pages.
+name: Deploy to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+env:
+  EMSDK_VERSION: 6.0.13
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Includes Emscripten's ports cache (SDL3, FreeType, HarfBuzz, ...).
+      - uses: actions/cache@v4
+        with:
+          path: ~/emsdk
+          key: emsdk-${{ env.EMSDK_VERSION }}-${{ runner.os }}
+
+      - name: Install Emscripten
+        run: |
+          [ -d ~/emsdk ] || git clone --depth 1 https://github.com/emscripten-core/emsdk.git ~/emsdk
+          ~/emsdk/emsdk install $EMSDK_VERSION
+          ~/emsdk/emsdk activate $EMSDK_VERSION
+
+      - name: Build
+        run: |
+          source ~/emsdk/emsdk_env.sh
+          python3 build.py
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
