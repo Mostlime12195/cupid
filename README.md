@@ -116,6 +116,42 @@ actually cheaper on the web in this test, so games that spend their frame
 in LÖVE's C++ code rather than in Lua lose little. The web column for the
 Lua rows comes from the Node/V8 runs above, not from inside a browser.
 
+### Compared to p5.js
+
+`tools/p5bench` is the same workload written the idiomatic p5.js way
+(`tint`, `push`/`translate`/`rotate`/`image`/`pop`, `rect`, `pixels[]`).
+Both ran in the same Chromium on an Apple Silicon Mac, 800×600 canvas at
+pixel density 1. "Frame period" is the measured time between frames, so it
+includes GPU work.
+
+| Drawing 20k tinted, rotated sprites + 5k rectangles | Frame period |
+| --- | --- |
+| This project (WebGL 2) | 12 ms |
+| p5.js 1.11.3, `WEBGL` | 400 ms |
+| p5.js 2.0.3, `WEBGL` | 617 ms |
+| p5.js 1.11.3, default canvas | about 3,800 ms |
+| p5.js 2.0.3, default canvas | about 3,100 ms |
+| p5.js 2.0.3, default canvas, sprites not tinted | 50 ms |
+
+LÖVE batches consecutive draws of the same texture into one GPU draw call;
+p5.js issues each shape separately, and its default canvas renderer redraws
+the image into an offscreen canvas for every tinted draw.
+
+Pure-language speed goes the other way, since V8 compiles JavaScript to
+machine code directly (p5.js: median of 6 page loads; this project: 2 page
+loads):
+
+| Test | p5.js (JavaScript) | This project (Lua, JIT on) |
+| --- | --- | --- |
+| Recursive `fib(27)` | 1.0 ms | 12.5–13.9 ms |
+| Fill and sort 200k numbers | 22 ms | 33–38 ms |
+| String formatting and patterns | 3.4 ms | 25–30 ms |
+| 300k small objects | 1.4 ms | 109–117 ms |
+| Fill a 512×512 image | 0.6 ms (`pixels[]`) | 14–15 ms (`mapPixel`) |
+
+So a sketch that draws a lot runs far faster here, while one dominated by
+its own number crunching runs faster in p5.js.
+
 Download size is larger than love.js because LÖVE 12 itself is: it adds the
 glslang shader compiler, HarfBuzz text shaping, a Noto Sans default font,
 and here also Theora video.

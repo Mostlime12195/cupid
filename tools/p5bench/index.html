@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>p5.js bench</title>
+<style>html, body { margin: 0; background: #1a1a1f; color: #ddd; font: 13px ui-monospace, Menlo, monospace; } main { display: flex; justify-content: center; }</style>
+</head>
+<body>
+<main id="stage"></main>
+<script>
+// The same workload as tools/bench/main.lua, written the idiomatic p5.js way.
+//   ?mode=webgl  use the WEBGL renderer (default P2D)
+//   ?tint=0      skip the per-sprite tint (P2D tint is very slow)
+//   ?v=1.11.3    p5.js version from jsDelivr
+const params = new URLSearchParams(location.search);
+const WEBGL_MODE = params.get("mode") === "webgl";
+const TINT = params.get("tint") !== "0";
+const VERSION = params.get("v") || "1.11.3";
+
+window.__t = {};
+const report = (name, ms) => { window.__t[name] = +ms.toFixed(1); console.log(`BENCH ${name} ${ms.toFixed(1)}`); };
+function bench(name, fn) {
+  fn(); // warm up
+  let best = Infinity;
+  for (let i = 0; i < 3; i++) { const t = performance.now(); fn(); best = Math.min(best, performance.now() - t); }
+  report(name, best);
+}
+const median = (a) => a.slice().sort((x, y) => x - y)[Math.floor(a.length / 2)];
+
+// Record the real frame period, which includes GPU and compositor time.
+const rafTimes = [];
+const rawRaf = window.requestAnimationFrame.bind(window);
+window.requestAnimationFrame = (cb) => rawRaf((t) => { rafTimes.push(t); cb(t); });
+
+function fib(n) { return n < 2 ? n : fib(n - 1) + fib(n - 2); }
+class V {
+  constructor(x, y) { this.x = x; this.y = y; }
+  add(b) { return new V(this.x + b.x, this.y + b.y); }
+}
+
+const SPRITES = 20000, RECTS = 5000;
+let img, frame = 0;
+const drawTimes = [];
+
+function setup() {
+  pixelDensity(1);
+  createCanvas(800, 600, WEBGL_MODE ? WEBGL : P2D).parent("stage");
+  console.log("BENCH start");
+  bench("fib(27)", () => fib(27));
+  bench("tables+sort", () => {
+    const t = [];
+    for (let i = 1; i <= 200000; i++) t.push((i * 7919) % 100003);
+    t.sort((a, b) => a - b);
+  });
+  bench("strings", () => {
+    const parts = [];
+    for (let i = 1; i <= 50000; i++) parts.push(`${i}:${"x".repeat(i % 10)}`);
+    const s = parts.join(",");
+    let n = 0;
+    for (const _ of s.matchAll(/\d+/g)) n++;
+  });
+  bench("closures/oop", () => {
+    let acc = new V(0, 0);
+    for (let i = 1; i <= 300000; i++) acc = acc.add(new V(i, -i));
+  });
+  img = createImage(16, 16);
+  img.loadPixels();
+  for (let y = 0; y < 16; y++) for (let x = 0; x < 16; x++) {
+    const k = (y * 16 + x) * 4;
+    img.pixels[k] = (x / 15) * 255; img.pixels[k + 1] = (y / 15) * 255; img.pixels[k + 2] = 255; img.pixels[k + 3] = 255;
+  }
+  img.updatePixels();
+  bench("imagedata 512^2", () => {
+    const big = createImage(512, 512);
+    big.loadPixels();
+    for (let y = 0; y < 512; y++) for (let x = 0; x < 512; x++) {
+      const k = (y * 512 + x) * 4;
+      big.pixels[k] = (x / 511) * 255; big.pixels[k + 1] = (y / 511) * 255; big.pixels[k + 2] = 127; big.pixels[k + 3] = 255;
+    }
+    big.updatePixels();
+  });
+  noStroke();
+}
+
+function draw() {
+  const t0 = performance.now();
+  if (WEBGL_MODE) translate(-width / 2, -height / 2);
+  background(25, 25, 30);
+  for (let i = 1; i <= SPRITES; i++) {
+    const a = i * 0.618;
+    if (TINT) tint(((i % 7) / 7) * 255, ((i % 5) / 5) * 255, ((i % 3) / 3) * 255);
+    push();
+    translate(400 + Math.cos(a + frame * 0.01) * (i % 300), 300 + Math.sin(a) * (i % 280));
+    rotate(a);
+    image(img, -8, -8);
+    pop();
+  }
+  fill(255);
+  for (let i = 1; i <= RECTS; i++) rect((i * 37) % 800, (i * 53) % 600, 6, 6);
+  const t1 = performance.now();
+  frame++;
+  if (frame > 10) drawTimes.push(t1 - t0);
+  if (frame === 70) {
+    report(`draw ${SPRITES / 1000}k sprites+${RECTS / 1000}k rects`, median(drawTimes));
+    const periods = [];
+    for (let i = rafTimes.length - 59; i < rafTimes.length; i++) periods.push(rafTimes[i] - rafTimes[i - 1]);
+    report("frame period", median(periods));
+    console.log("BENCH done");
+    window.__t.done = true;
+    noLoop();
+  }
+}
+</script>
+<script>
+document.write(`<script src="https://cdn.jsdelivr.net/npm/p5@${VERSION}/lib/p5.min.js"><\/script>`);
+</script>
+</body>
+</html>

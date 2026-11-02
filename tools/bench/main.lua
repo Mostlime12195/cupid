@@ -43,7 +43,7 @@ function love.load()
 end
 
 local SPRITES, RECTS = 20000, 5000
-local frame, drawTimes, frameTimes = 0, {}, {}
+local frame, drawTimes, frameTimes, periods, lastT0 = 0, {}, {}, {}, nil
 local function median(t) table.sort(t); return t[math.floor(#t / 2) + 1] end
 
 function love.run()
@@ -67,10 +67,15 @@ function love.run()
     love.graphics.present()
     local t2 = getTime()
     frame = frame + 1
-    if frame > 10 then drawTimes[#drawTimes + 1] = (t1 - t0) * 1000; frameTimes[#frameTimes + 1] = (t2 - t0) * 1000 end
+    if frame > 10 then
+      drawTimes[#drawTimes + 1] = (t1 - t0) * 1000; frameTimes[#frameTimes + 1] = (t2 - t0) * 1000
+      periods[#periods + 1] = (t0 - lastT0) * 1000
+    end
+    lastT0 = t0
     if frame == 70 then
       report(("draw %dk sprites+%dk rects"):format(SPRITES / 1000, RECTS / 1000), median(drawTimes))
       report("frame incl. present", median(frameTimes))
+      report("frame period", median(periods))
       print("BENCH done")
       if QUIT_WHEN_DONE then love.event.quit() end
     end
