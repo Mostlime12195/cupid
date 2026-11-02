@@ -158,6 +158,7 @@ def compile_one(src: Path, opt: list):
         flags = [f for f in flags if not f.startswith("-O")] + ["-Oz"]
     if is_cpp:
         flags.append("-std=c++20")
+
     cmd = [cc, *flags, "-MMD", "-MF", str(obj.with_suffix(".d")), "-c", str(src), "-o", str(obj)]
     r = subprocess.run(cmd, capture_output=True, text=True)
     return src, r.returncode, r.stdout + r.stderr
@@ -169,6 +170,8 @@ def main():
     ap.add_argument("-j", type=int, default=os.cpu_count())
     ap.add_argument("--only-compile", action="store_true")
     ap.add_argument("--web-only", action="store_true", help="only copy player/editor files")
+    ap.add_argument("--profiling", action="store_true",
+                    help="keep function names (for size analysis); output to build/profiling")
     args = ap.parse_args()
 
     if args.web_only:
@@ -200,7 +203,8 @@ def main():
     if args.only_compile:
         return
 
-    DIST.mkdir(exist_ok=True)
+    out_dir = BUILD / "profiling" if args.profiling else DIST
+    out_dir.mkdir(parents=True, exist_ok=True)
     objs = [str(obj_path(s)) for s in sources]
     link = [
         "em++", *objs, *COMMON_FLAGS, *opt,
@@ -215,16 +219,17 @@ def main():
         "-sEXPORTED_RUNTIME_METHODS=FS,IDBFS,callMain,ccall,cwrap,HEAPU8",
         "-sEXPORTED_FUNCTIONS=_main,_malloc,_free,_loveweb_push_event,_loveweb_quit,_loveweb_set_paused",
         "-sINVOKE_RUN=0", "-sEXIT_RUNTIME=0",
-        "-o", str(DIST / "love.mjs"),
-    ]
+        "-o", str(out_dir / "love.mjs"),
+    ] + (["--profiling-funcs"] if args.profiling else [])
     print("linking...")
     r = subprocess.run(link)
     if r.returncode != 0:
         sys.exit("link failed")
     for f in ("love.mjs", "love.wasm"):
-        p = DIST / f
+        p = out_dir / f
         print(f"  {f}: {p.stat().st_size / 1e6:.2f} MB")
-    copy_web()
+    if not args.profiling:
+        copy_web()
 
 
 def copy_web():

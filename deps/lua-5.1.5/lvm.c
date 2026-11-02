@@ -374,6 +374,10 @@ static void Arith (lua_State *L, StkId ra, const TValue *rb,
 
 
 
+/* LÖVE web: keep the interpreter loop out of setjmp-protected callers
+   (luaD_rawrunprotected). With link-time optimisation it could otherwise
+   be inlined there, and every call it makes would pay for wasm SjLj. */
+__attribute__((noinline))
 void luaV_execute (lua_State *L, int nexeccalls) {
   LClosure *cl;
   StkId base;
