@@ -1,0 +1,11 @@
+libtheora 1.2.0, decoder only
+-----------------------------
+
+From https://github.com/xiph/theora, tag v1.2.0 (commit 8e48087),
+unmodified. Only the files the decoder needs (lib/Makefile.am's
+decoder_sources, without the legacy theora_* API wrappers and the
+x86/ARM assembly) and their headers are included. libogg comes from
+Emscripten's port (-sUSE_OGG=1).
+
+libtheora is Copyright (C) 2002-2009 Xiph.org Foundation and is under
+a BSD-style license: see COPYING and LICENSE.
