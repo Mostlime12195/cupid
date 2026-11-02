@@ -118,7 +118,8 @@ EXTRA_SOURCES = [
 
 def lua_sources():
     skip = {"lua.c", "luac.c", "print.c"}
-    return sorted(p for p in LUA.glob("*.c") if p.name not in skip)
+    lua = sorted(p for p in LUA.glob("*.c") if p.name not in skip)
+    return lua + [ROOT / "deps" / "luabitop" / "bit.c"]
 
 
 def web_sources():

@@ -57,6 +57,10 @@
 #ifdef LOVE_ENABLE_LUA53
 #	include "libraries/lua53/lutf8lib.h"
 #endif
+#ifdef LOVE_EMSCRIPTEN
+// LuaBitOp (deps/luabitop), the library LuaJIT's built-in 'bit' is based on.
+extern "C" int luaopen_bit(lua_State *L);
+#endif
 
 // For love::graphics::setGammaCorrect.
 #ifdef LOVE_ENABLE_GRAPHICS
@@ -659,6 +663,19 @@ int luaopen_love(lua_State *L)
 #endif
 #ifdef LOVE_ENABLE_LUA53
 	love::luax_preload(L, luaopen_luautf8, "utf8");
+#endif
+#ifdef LOVE_EMSCRIPTEN
+	// LuaJIT provides 'bit' as a global; many games rely on it.
+	lua_getglobal(L, "bit");
+	bool hasbit = !lua_isnil(L, -1);
+	lua_pop(L, 1);
+	if (!hasbit)
+	{
+		// luaopen_bit leaves more than the library table on the stack.
+		int top = lua_gettop(L);
+		luaopen_bit(L);
+		lua_settop(L, top);
+	}
 #endif
 #ifdef LOVE_ENABLE_LUAHTTPS
 	love::luax_preload(L, luaopen_https, "https");
