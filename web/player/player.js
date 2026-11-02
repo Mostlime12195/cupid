@@ -133,6 +133,46 @@ $('#btn-fullscreen').addEventListener('click', () => {
 });
 
 // ---------------------------------------------------------------------------
+// File dialogs. Browsers only open file pickers in response to a click or
+// key press. love.window.showFileDialog runs later (in the game's frame), so
+// unless the key press or click that led to it still counts, the engine asks
+// for a click on this bar first; confirm() opens the picker from that click.
+// Saving always goes through the bar: it stands in for the save dialog, and
+// the file is downloaded once the game has written it.
+
+let dialogRequest = null;
+
+function requestGesture({ type, title, acceptLabel, cancelLabel, name }, confirm, cancel) {
+  const bar = $('#dialog-bar');
+  const ok = $('#dialog-ok');
+  const no = $('#dialog-cancel');
+  const what = type === 'savefile' ? `Save “${name}”` : type === 'openfolder' ? 'Open a folder' : 'Open a file';
+  $('#dialog-title').textContent = title ? `${title}${type === 'savefile' ? ` (${name})` : ''}` : what;
+  ok.textContent = acceptLabel || (type === 'savefile' ? 'Save' : type === 'openfolder' ? 'Choose folder…' : 'Choose file…');
+  no.textContent = cancelLabel || 'Cancel';
+
+  const close = () => {
+    bar.hidden = true;
+    ok.onclick = no.onclick = null;
+    dialogRequest = null;
+    canvas.focus();
+  };
+  ok.onclick = () => { confirm(); close(); };
+  no.onclick = () => { close(); cancel(); };
+  dialogRequest = { cancel: no.onclick };
+  bar.hidden = false;
+  ok.focus();
+}
+
+// Keys pressed on the bar aren't game input.
+for (const type of ['keydown', 'keyup', 'keypress']) {
+  $('#dialog-bar').addEventListener(type, (e) => {
+    e.stopPropagation();
+    if (type === 'keydown' && e.key === 'Escape') dialogRequest?.cancel();
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Engine
 
 let Module = null;
@@ -182,6 +222,7 @@ const engineReady = createLove({
   print: (t) => output('out', t),
   printErr: (t) => output('err', t),
   onLoveQuit: (code) => onQuit(code),
+  loveRequestGesture: requestGesture,
   onAbort: (what) => fail(`The engine crashed: ${what}`),
 }).then((M) => {
   Module = M;
@@ -284,6 +325,9 @@ async function start(game) {
 
 async function onQuit(code) {
   running = false;
+  // A dialog left open has no game to report back to.
+  $('#dialog-bar').hidden = true;
+  dialogRequest = null;
   flushError();
   await syncSaves(false);
   post({ type: 'quit', code });

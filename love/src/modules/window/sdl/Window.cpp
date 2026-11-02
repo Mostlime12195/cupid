@@ -44,6 +44,20 @@
 // C
 #include <cstdio>
 
+#ifdef LOVE_EMSCRIPTEN
+#include <emscripten.h>
+
+extern "C"
+{
+// Implemented in web/native/library_love.js.
+int loveweb_text_input_default();
+void loveweb_show_file_dialog(void *state, int type, const char *title,
+                              const char *acceptlabel, const char *cancellabel,
+                              const char *defaultname, const char *const *filters,
+                              int nfilters, int multiselect);
+}
+#endif
+
 #ifdef LOVE_GRAPHICS_VULKAN
 #include <SDL3/SDL_vulkan.h>
 #endif
@@ -336,7 +350,10 @@ bool Window::createWindowAndContext(int x, int y, int w, int h, Uint32 windowfla
 #ifdef LOVE_EMSCRIPTEN
 		// SDL3 doesn't enable text input automatically on the web, but
 		// desktop LÖVE games expect love.textinput to work out of the box.
-		SDL_StartTextInput(window);
+		// On touch devices it starts off, as on Android and iOS, so the
+		// on-screen keyboard only appears when a game asks for text input.
+		if (loveweb_text_input_default())
+			SDL_StartTextInput(window);
 #endif
 
 		if (attribs != nullptr && renderer == love::graphics::Renderer::RENDERER_OPENGL)
@@ -1548,6 +1565,31 @@ static void SDLCALL fileDialogCallbackSDL(void *userdata, const char *const *fil
 	SDL_PushEvent(&event);
 }
 
+#ifdef LOVE_EMSCRIPTEN
+// The browser side (web/native/library_love.js) shows a file picker, copies
+// the picked files into the in-memory filesystem and reports their paths
+// here, then finishes the dialog like SDL's callback would.
+extern "C" EMSCRIPTEN_KEEPALIVE void loveweb_file_dialog_add(void *state, const char *path)
+{
+	((FileDialogState *) state)->files.push_back(path);
+}
+
+extern "C" EMSCRIPTEN_KEEPALIVE void loveweb_file_dialog_done(void *state, int filter, const char *err)
+{
+	if (err != nullptr)
+	{
+		SDL_SetError("%s", err);
+		fileDialogCallbackSDL(state, nullptr, -1);
+	}
+	else
+	{
+		// Same as SDL: an empty list (with no error) means it was cancelled.
+		const char *const none[] = { nullptr };
+		fileDialogCallbackSDL(state, none, filter);
+	}
+}
+#endif
+
 void Window::handleSDLEvent(const SDL_Event &event)
 {
 	if (event.type == dialogEventId)
@@ -1621,8 +1663,16 @@ void Window::showFileDialog(const FileDialogData &data, FileDialogCallback callb
 	SDL_SetBooleanProperty(state->props, SDL_PROP_FILE_DIALOG_MANY_BOOLEAN, data.multiSelect);
 
 #ifdef LOVE_EMSCRIPTEN
-	SDL_SetError("File dialogs are not supported on the web.");
-	fileDialogCallbackSDL(state, nullptr, -1);
+	std::vector<const char *> filters;
+	for (const auto &filter : state->data.filters)
+	{
+		filters.push_back(filter.name.c_str());
+		filters.push_back(filter.pattern.c_str());
+	}
+	loveweb_show_file_dialog(state, (int) data.type, state->data.title.c_str(),
+		state->data.acceptLabel.c_str(), state->data.cancelLabel.c_str(),
+		state->data.defaultName.c_str(), filters.data(), (int) state->data.filters.size(),
+		data.multiSelect ? 1 : 0);
 #else
 	SDL_ShowFileDialogWithProperties(sdltype, fileDialogCallbackSDL, state, state->props);
 #endif

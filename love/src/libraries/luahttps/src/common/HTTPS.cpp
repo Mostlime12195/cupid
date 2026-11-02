@@ -23,6 +23,9 @@
 #ifdef HTTPS_BACKEND_WININET
 #	include "../windows/WinINetClient.h"
 #endif
+#ifdef HTTPS_BACKEND_EMSCRIPTEN
+#	include "../emscripten/EmscriptenClient.h"
+#endif
 
 #ifdef HTTPS_BACKEND_CURL
 	static CurlClient curlclient;
@@ -41,6 +44,9 @@
 #endif
 #ifdef HTTPS_BACKEND_WININET
 	static WinINetClient wininetclient;
+#endif
+#ifdef HTTPS_BACKEND_EMSCRIPTEN
+	static EmscriptenClient emscriptenclient;
 #endif
 
 static HTTPSClient *clients[] = {
@@ -62,6 +68,9 @@ static HTTPSClient *clients[] = {
 #endif
 #ifdef HTTPS_BACKEND_ANDROID
 	&androidclient,
+#endif
+#ifdef HTTPS_BACKEND_EMSCRIPTEN
+	&emscriptenclient,
 #endif
 	nullptr,
 };

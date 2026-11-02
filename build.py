@@ -55,6 +55,7 @@ LOVE_TARGETS = [
     "love_3p_box2d", "love_3p_ddsparse", "love_3p_glad", "love_3p_glslang",
     "love_3p_lodepng", "love_3p_lua53", "love_3p_lz4", "love_3p_noise1234",
     "love_3p_physfs", "love_3p_wuff", "love_3p_xxhash",
+    "love_3p_luahttps",
 ]
 
 # Files listed by CMake that must not be built for the web.
@@ -115,6 +116,7 @@ def cmake_sources():
 # Individual files needed from targets that are otherwise left out.
 EXTRA_SOURCES = [
     "src/modules/thread/web/GreenThreads.cpp",
+    "src/libraries/luahttps/src/emscripten/EmscriptenClient.cpp",
 ]
 
 
@@ -229,7 +231,13 @@ def main():
         "-sGL_ENABLE_GET_PROC_ADDRESS=1",
         "-sFORCE_FILESYSTEM=1",
         "-sEXPORTED_RUNTIME_METHODS=FS,IDBFS,callMain,ccall,cwrap,HEAPU8",
-        "-sEXPORTED_FUNCTIONS=_main,_malloc,_free,_loveweb_quit,_loveweb_set_paused,_loveweb_fit_window,_ljit_configure,_ljit_stats",
+        "-sEXPORTED_FUNCTIONS=" + ",".join([
+            "_main", "_malloc", "_free",
+            "_loveweb_quit", "_loveweb_set_paused", "_loveweb_fit_window",
+            "_loveweb_file_dialog_add", "_loveweb_file_dialog_done",
+            "_loveweb_text_input", "_loveweb_text_editing", "_loveweb_text_key",
+            "_ljit_configure", "_ljit_stats",
+        ]),
         "-sINVOKE_RUN=0", "-sEXIT_RUNTIME=0",
         "-o", str(out_dir / "love.mjs"),
     ] + (["--profiling-funcs"] if args.profiling else [])
