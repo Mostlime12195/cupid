@@ -333,6 +333,12 @@ bool Window::createWindowAndContext(int x, int y, int w, int h, Uint32 windowfla
 
 		SDL_SetWindowPosition(window, x, y);
 
+#ifdef LOVE_EMSCRIPTEN
+		// SDL3 doesn't enable text input automatically on the web, but
+		// desktop LÖVE games expect love.textinput to work out of the box.
+		SDL_StartTextInput(window);
+#endif
+
 		if (attribs != nullptr && renderer == love::graphics::Renderer::RENDERER_OPENGL)
 		{
 #ifdef LOVE_MACOS
