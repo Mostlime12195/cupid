@@ -491,6 +491,8 @@ enum { V_L = 0, V_BASE, V_IDX, V_T, V_R, V_TAB, V_S, V_D1, V_D2 };
 #define T_ARRAY   ((int)offsetof(Table, array))
 #define T_NODE    ((int)offsetof(Table, node))
 #define T_SIZEARRAY ((int)offsetof(Table, sizearray))
+#define LCL_UPVALS ((int)offsetof(LClosure, upvals))
+#define UV_V      ((int)offsetof(UpVal, v))
 #define N_SIZE    ((int)sizeof(Node))
 #define N_KEYVAL  ((int)offsetof(Node, i_key.nk.value))
 #define N_KEYTT   ((int)offsetof(Node, i_key.nk.tt))
@@ -697,11 +699,49 @@ static void arith (Compiler *cc, Instruction i, int wop) {
   end(cc);
 }
 
+/* For `register == constant` with a nil, boolean or string constant, pushes
+** the result (no metamethod can apply). Returns 0 if not applicable. */
+static int compare_const (Compiler *cc, int b, int c) {
+  int r, kidx;
+  TValue *kv;
+  if (ISK(b) && !ISK(c)) { r = c; kidx = INDEXK(b); }
+  else if (ISK(c) && !ISK(b)) { r = b; kidx = INDEXK(c); }
+  else return 0;
+  kv = &cc->p->k[kidx];
+  switch (ttype(kv)) {
+    case LUA_TNIL:
+      lget(cc, V_BASE); mem(cc, W_I32_LOAD, 2, reg(r) + TV_TT);
+      op(cc, W_I32_EQZ);
+      return 1;
+    case LUA_TBOOLEAN:
+    case LUA_TSTRING:
+      lget(cc, V_BASE); mem(cc, W_I32_LOAD, 2, reg(r) + TV_TT);
+      i32c(cc, ttype(kv)); op(cc, W_I32_EQ);
+      lget(cc, V_BASE); mem(cc, W_I32_LOAD, 2, reg(r) + TV_VALUE);
+      /* strings are interned, so equal strings are the same object */
+      i32c(cc, ttisstring(kv) ? (int)(size_t)rawtsvalue(kv) : bvalue(kv));
+      op(cc, W_I32_EQ);
+      op(cc, W_I32_AND);
+      return 1;
+    default:
+      return 0;
+  }
+}
+
 static void compare (Compiler *cc, Instruction i, int o) {
   int a = GETARG_A(i), b = GETARG_B(i), c = GETARG_C(i);
   int next = cc->pcidx + 1;
   int target = next + 1 + GETARG_sBx(cc->p->code[next]);
   int fast = !(ISK(b) && !isk_number(cc, b)) && !(ISK(c) && !isk_number(cc, c));
+  if (o == OP_EQ && compare_const(cc, b, c)) {
+    i32c(cc, a);
+    op(cc, W_I32_EQ);
+    block(cc, W_IF, W_VOID);
+    jump(cc, target);
+    end(cc);
+    jump(cc, cc->pcidx + 2);
+    return;
+  }
   if (fast) {
     block(cc, W_BLOCK, W_VOID);  /* done */
     block(cc, W_BLOCK, W_VOID);  /* slow */
@@ -984,11 +1024,41 @@ static void instruction (Compiler *cc) {
       end(cc);
       break;
     }
+    case OP_GETUPVAL: {
+      /* ra = cl->upvals[B]->v */
+      int half;
+      lget(cc, V_L);
+      mem(cc, W_I32_LOAD, 2, L_CI);
+      mem(cc, W_I32_LOAD, 2, CI_FUNC);
+      mem(cc, W_I32_LOAD, 2, TV_VALUE);
+      mem(cc, W_I32_LOAD, 2, LCL_UPVALS + GETARG_B(i) * (int)sizeof(UpVal *));
+      mem(cc, W_I32_LOAD, 2, UV_V);
+      lset(cc, V_S);
+      for (half = 0; half < 2; half++) {
+        lget(cc, V_BASE);
+        lget(cc, V_S);
+        mem(cc, W_I64_LOAD, 3, half * 8);
+        mem(cc, W_I64_STORE, 3, reg(a) + half * 8);
+      }
+      break;
+    }
+    /* The inline paths take keys as RK operands, which can only refer to
+    ** the first MAXINDEXRK+1 constants. */
     case OP_GETGLOBAL:
-      get_table(cc, a, -1, RKASK(GETARG_Bx(i)), 0);
+      if (GETARG_Bx(i) <= MAXINDEXRK)
+        get_table(cc, a, -1, RKASK(GETARG_Bx(i)), 0);
+      else {
+        call_helper(cc, H_EXEC);
+        reload_base(cc);
+      }
       break;
     case OP_SETGLOBAL:
-      set_table(cc, -1, RKASK(GETARG_Bx(i)), a);
+      if (GETARG_Bx(i) <= MAXINDEXRK)
+        set_table(cc, -1, RKASK(GETARG_Bx(i)), a);
+      else {
+        call_helper(cc, H_EXEC);
+        reload_base(cc);
+      }
       break;
     case OP_GETTABLE:
       if (inline_key(cc, GETARG_C(i)))
