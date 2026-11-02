@@ -226,6 +226,8 @@ std::string Filesystem::getExecutablePath() const
 
 	return std::string(buffer, len);
 
+#elif defined(LOVE_EMSCRIPTEN)
+	return "/love";
 #else
 #error Missing implementation for Filesystem::getExecutablePath!
 #endif

@@ -1614,7 +1614,12 @@ void Window::showFileDialog(const FileDialogData &data, FileDialogCallback callb
 
 	SDL_SetBooleanProperty(state->props, SDL_PROP_FILE_DIALOG_MANY_BOOLEAN, data.multiSelect);
 
+#ifdef LOVE_EMSCRIPTEN
+	SDL_SetError("File dialogs are not supported on the web.");
+	fileDialogCallbackSDL(state, nullptr, -1);
+#else
 	SDL_ShowFileDialogWithProperties(sdltype, fileDialogCallbackSDL, state, state->props);
+#endif
 }
 
 void Window::requestAttention(bool continuous)

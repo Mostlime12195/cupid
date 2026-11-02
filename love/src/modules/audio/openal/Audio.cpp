@@ -420,9 +420,17 @@ void Audio::getPlaybackDevices(std::vector<std::string> &list)
 	}
 }
 
+#ifdef LOVE_EMSCRIPTEN
+// Emscripten's OpenAL headers declare these extensions without the
+// function pointer typedefs.
+typedef ALCboolean (*LPALCREOPENDEVICESOFT)(ALCdevice *, const ALCchar *, const ALCint *);
+typedef ALCboolean (*LPALCRESETDEVICESOFT)(ALCdevice *, const ALCint *);
+typedef const ALCchar *(*LPALCGETSTRINGISOFT)(ALCdevice *, ALCenum, ALCsizei);
+#endif
+
 void Audio::setPlaybackDevice(const char *name)
 {
-#ifndef ALC_SOFT_reopen_device
+#if !defined(ALC_SOFT_reopen_device) && !defined(LOVE_EMSCRIPTEN)
 	typedef ALCboolean (ALC_APIENTRY*LPALCREOPENDEVICESOFT)(ALCdevice *device,
 		const ALCchar *deviceName, const ALCint *attribs);
 #endif

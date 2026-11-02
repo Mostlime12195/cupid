@@ -1205,6 +1205,11 @@ bool OpenGL::rawTexStorage(TextureType target, int levels, PixelFormat pixelform
 		fmt.internalformat = fmt.externalformat;
 	}
 
+#ifdef LOVE_EMSCRIPTEN
+	if (pixelformat == PIXELFORMAT_LA8_UNORM)
+		usetexstorage = false;
+#endif
+
 	if (usetexstorage)
 	{
 		if (target == TEXTURE_2D || target == TEXTURE_CUBE)
@@ -1601,6 +1606,14 @@ OpenGL::TextureFormat OpenGL::convertPixelFormat(PixelFormat pixelformat)
 		break;
 
 	case PIXELFORMAT_LA8_UNORM:
+#ifdef LOVE_EMSCRIPTEN
+		// WebGL2 has no texture swizzle, but still supports the unsized
+		// LUMINANCE_ALPHA format (via glTexImage, not glTexStorage).
+		f.internalformat = GL_LUMINANCE_ALPHA;
+		f.externalformat = GL_LUMINANCE_ALPHA;
+		f.type = GL_UNSIGNED_BYTE;
+		break;
+#endif
 		if (gl.isCoreProfile() || GLAD_ES_VERSION_3_0)
 		{
 			f.internalformat = GL_RG8;

@@ -27,6 +27,12 @@ namespace love
 
 void sleep(double ms)
 {
+#ifdef LOVE_EMSCRIPTEN
+	// Blocking the browser's main thread never helps; the frame loop is driven
+	// by requestAnimationFrame instead.
+	(void) ms;
+	return;
+#endif
 	// We don't need to initialize the SDL timer subsystem for SDL_Delay to
 	// function - and doing so causes SDL to create a worker thread.
 	SDL_DelayNS(SDL_NS_PER_MS * ms);

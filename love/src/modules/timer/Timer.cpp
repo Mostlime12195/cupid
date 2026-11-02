@@ -31,6 +31,8 @@
 #elif defined(LOVE_MACOS) || defined(LOVE_IOS)
 #include <mach/mach_time.h>
 #include <sys/time.h>
+#elif defined(LOVE_EMSCRIPTEN)
+#include <emscripten.h>
 #elif defined(LOVE_LINUX)
 #include <unistd.h>
 #include <time.h>
@@ -103,7 +105,15 @@ double Timer::getAverageDelta() const
 	return averageDelta;
 }
 
-#if defined(LOVE_LINUX)
+#if defined(LOVE_EMSCRIPTEN)
+
+double Timer::getTime()
+{
+	static const double start = emscripten_get_now();
+	return (emscripten_get_now() - start) / 1000.0;
+}
+
+#elif defined(LOVE_LINUX)
 
 static inline timespec getTimeOfDay()
 {

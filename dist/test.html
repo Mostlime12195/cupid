@@ -1,0 +1,29 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>LÖVE web test</title>
+<style>body{background:#222;color:#ddd;font:13px monospace;margin:0}canvas{display:block}</style></head>
+<body><canvas id="canvas" tabindex="1"></canvas><pre id="log"></pre>
+<script type="module">
+import createLove from './love.mjs';
+const log = (...a) => { document.getElementById('log').textContent += a.join(' ') + '\n'; console.log(...a); };
+const main = `
+local t = 0
+function love.load() print("love.load", love.getVersion()) end
+function love.update(dt) t = t + dt end
+function love.draw()
+  love.graphics.setColor(1, 0.4, 0.6)
+  love.graphics.circle("fill", 400 + math.cos(t) * 150, 300 + math.sin(t) * 150, 40)
+  love.graphics.setColor(1, 1, 1)
+  love.graphics.print("Hello from LÖVE 12 on the web! FPS: " .. love.timer.getFPS(), 10, 10)
+  love.graphics.rectangle("line", 300, 200, 200, 200)
+end
+`;
+const Module = await createLove({
+  canvas: document.getElementById('canvas'),
+  print: log, printErr: log,
+  onLoveQuit: (code) => log('quit', code),
+});
+Module.FS.mkdir('/game');
+Module.FS.writeFile('/game/main.lua', main);
+window.M = Module;
+Module.callMain(['/game']);
+</script></body></html>

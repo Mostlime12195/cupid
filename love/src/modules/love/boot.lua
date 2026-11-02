@@ -366,7 +366,9 @@ function love.init()
 		"math",
 		"physics",
 	} do
-		if c.modules[v] then
+		-- Builds without a module (e.g. video on the web) leave it out of
+		-- package.preload; skip it instead of failing to boot.
+		if c.modules[v] and package.preload["love." .. v] then
 			require("love." .. v)
 		end
 	end
