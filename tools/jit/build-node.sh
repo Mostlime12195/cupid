@@ -6,7 +6,7 @@ cd "$(dirname "$0")/../.."
 mkdir -p build/jit-node
 SRC=$(ls deps/lua-5.1.5/*.c | grep -v -e luac.c -e print.c)
 emcc $SRC deps/luabitop/bit.c \
-  -O2 -fwasm-exceptions -sSUPPORT_LONGJMP=wasm -Ideps/lua-5.1.5 \
+  -O3 -flto -fwasm-exceptions -sSUPPORT_LONGJMP=wasm -Ideps/lua-5.1.5 \
   -sENVIRONMENT=node -sNODERAWFS=1 -sALLOW_TABLE_GROWTH=1 -sALLOW_MEMORY_GROWTH=1 -sSTACK_SIZE=2MB \
   -sMODULARIZE=1 -sEXPORT_ES6=1 -sINVOKE_RUN=0 -sEXIT_RUNTIME=1 \
   -sEXPORTED_FUNCTIONS=_main,_ljit_configure,_ljit_stats -sEXPORTED_RUNTIME_METHODS=callMain \

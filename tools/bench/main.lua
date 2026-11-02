@@ -72,6 +72,7 @@ function love.run()
       report(("draw %dk sprites+%dk rects"):format(SPRITES / 1000, RECTS / 1000), median(drawTimes))
       report("frame incl. present", median(frameTimes))
       print("BENCH done")
+      if QUIT_WHEN_DONE then love.event.quit() end
     end
   end
 end
