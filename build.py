@@ -223,7 +223,12 @@ def main():
         "-sGL_ENABLE_GET_PROC_ADDRESS=1",
         "-sFORCE_FILESYSTEM=1",
         "-sEXPORTED_RUNTIME_METHODS=FS,IDBFS,callMain,ccall,cwrap,HEAPU8",
-        "-sEXPORTED_FUNCTIONS=_main,_malloc,_free,_loveweb_quit,_loveweb_set_paused,_loveweb_fit_window",
+        "-sEXPORTED_FUNCTIONS=" + ",".join([
+            "_main", "_malloc", "_free",
+            "_loveweb_quit", "_loveweb_set_paused", "_loveweb_fit_window",
+            "_loveweb_file_dialog_add", "_loveweb_file_dialog_done",
+            "_loveweb_text_input", "_loveweb_text_editing", "_loveweb_text_key",
+        ]),
         "-sINVOKE_RUN=0", "-sEXIT_RUNTIME=0",
         "-o", str(out_dir / "love.mjs"),
     ] + (["--profiling-funcs"] if args.profiling else [])

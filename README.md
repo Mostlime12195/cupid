@@ -23,7 +23,7 @@ decoding, and save files.
 | `build.py` | Build script (reads source lists from `love/CMakeLists.txt`) |
 | `serve.py` | Local dev server |
 | `package.py` | Command-line web export for a game folder or `.love` |
-| `tools/` | Test games: `bench` (benchmark), `smoke` (feature checks), `threads` |
+| `tools/` | Test games: `bench` (benchmark), `smoke` (feature checks), `threads`, `https`, `filedialog`, `textinput`; `test_server.py` serves them |
 
 ## Compared to love.js
 
@@ -127,6 +127,11 @@ python3 serve.py
 and open http://localhost:8765/ for the editor or
 http://localhost:8765/player.html?game=examples/hello.love for the player.
 
+The test games in `tools/` run with `python3 tools/test_server.py 8772`,
+which zips them on request and adds the routes the `https` test needs:
+http://localhost:8772/player.html?game=tools/https.love (or `smoke`,
+`filedialog`, `textinput`, ...).
+
 ## The editor (LÖVE Web Studio)
 
 `dist/index.html`. Everything is stored in the browser (IndexedDB); nothing is
@@ -180,7 +185,43 @@ Player URL options:
 - Save files live in IndexedDB and are flushed every 2 seconds, when the tab
   is hidden, and when the game quits.
 - `love.timer.sleep` on the main thread doesn't block (it lets threads run instead).
-- Text input is enabled by default, as on desktop.
+- Text input is enabled by default, as on desktop, except on touch devices
+  (no hover, coarse pointer), where it starts off as on Android and iOS.
+  While it's on, a hidden text field has keyboard focus instead of the
+  canvas, so IME composition (Chinese, Japanese, Korean), emoji pickers,
+  dictation and on-screen keyboards reach `love.textinput` (composition in
+  progress is reported to `love.textedited`). `love.keypressed` works as
+  before; keys that belong to an IME composition don't produce key presses.
+  Pasting into the field is ignored, as on desktop: use
+  `love.system.getClipboardText`.
+- On touch devices, tap the game while text input is on to bring up the
+  on-screen keyboard (browsers only show it in response to a tap).
+  `love.keyboard.setTextInput(true, x, y, w, h)` moves the hidden field over
+  that rectangle, which is where IME candidate windows appear.
+- `require("https")` (lua-https) works, using a synchronous `XMLHttpRequest`:
+  it blocks like on desktop. Browser rules apply: other sites must allow
+  cross-origin requests (CORS), an `https` page can't request `http` URLs,
+  and some request headers (`User-Agent`, `Content-Length`, ...) are set by
+  the browser. Network errors, including refused CORS requests, return
+  status `0` with an error message as the body (like lua-https on macOS).
+  Response header names are lower case. Relative URLs are resolved against
+  the page, so a game can request files hosted next to it.
+- `love.window.showFileDialog` uses the browser's file picker.
+  - `openfile` and `openfolder` copy what was picked into the in-memory file
+    system (`/picked/<n>/...`) and return those paths; read them as on
+    desktop with `love.filesystem.openNativeFile`, `mountFullPath` or
+    `io.open`. Filters become the picker's `accept` list; browsers can't
+    show a title or button labels.
+  - `savefile` returns `/picked/<n>/<defaultname>`. When the game has
+    written and closed that file, the browser downloads it under that name
+    (again on every later save to it).
+  - Cancelling returns an empty list, as on desktop.
+  - Browsers only open pickers in response to a click or key press. If the
+    game calls `showFileDialog` from `love.keypressed` or
+    `love.mousepressed`, the picker opens directly (in browsers that report
+    `navigator.userActivation`). Otherwise, and always for `savefile`, the
+    player shows a small bar with a "Choose file…" / "Save" button and
+    Cancel; the picker opens when it's clicked.
 - Games with `t.window.resizable = true` fill the page and get `love.resize`.
 - `love.window.setFullscreen` resizes the game immediately; the browser
   enters real fullscreen on the next click or key press (browsers only allow
@@ -189,11 +230,9 @@ Player URL options:
 ## Not supported
 
 - `love.video` (no Theora port for Emscripten yet).
-- Networking modules: `socket` (LuaSocket), `enet`, `https`.
-- `love.window.showFileDialog`.
+- Networking modules: `socket` (LuaSocket) and `enet` (browsers have no raw
+  sockets). `https` works, see above.
 - WOFF2 fonts (FreeType is built without Brotli); TTF and OTF work.
-- Text entered without key events (some IME and on-screen keyboards) doesn't
-  reach `love.textinput` yet; SDL3's web backend only reads key events.
 - LuaJIT-only features: the JIT itself and `ffi` (`bit` is provided).
 - Compute shaders (WebGL 2 has none).
 
@@ -207,8 +246,11 @@ its boot coroutine in a `while` loop. `boot.lua` yields once per iteration of
 The engine patches (`git diff dca79b4 -- love deps`) are kept small so they
 can be rebased onto newer LÖVE commits:
 
-- Add an `LOVE_EMSCRIPTEN` platform (`config.h`) and leave out video and
-  networking.
+- Add an `LOVE_EMSCRIPTEN` platform (`config.h`) and leave out video,
+  LuaSocket and ENet.
+- lua-https gets a browser backend
+  (`love/src/libraries/luahttps/src/emscripten`, requests made in
+  `web/native/library_love.js`).
 - WebGL 2 differences: no texture swizzle (LA8 textures use
   `LUMINANCE_ALPHA`), no `GL_FRAMEBUFFER_SRGB` toggle.
 - `love.timer` uses `emscripten_get_now`; sleeping doesn't block.
@@ -216,7 +258,11 @@ can be rebased onto newer LÖVE commits:
   frame loop and a timer instead of a pool thread, and recovers from underruns.
 - `boot.lua` skips modules the build doesn't include.
 - LuaBitOp (`deps/luabitop`) is loaded as the global `bit`, as on LuaJIT.
-- SDL3 text input is started when the window is created.
+- SDL3 text input is started when the window is created (not on touch
+  devices). Text from the page's hidden text field is pushed as SDL text
+  events by `web/native/web_main.cpp`.
+- `love.window.showFileDialog` hands the dialog to `library_love.js`
+  instead of SDL (`love/src/modules/window/sdl/Window.cpp`).
 
 ## Licenses
 

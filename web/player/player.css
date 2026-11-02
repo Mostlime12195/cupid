@@ -119,3 +119,37 @@ body:hover #toolbar { opacity: 0.85; }
   cursor: pointer;
 }
 body.embed #toolbar { display: none; }
+
+/* Shown when a game opens a file dialog outside of a click or key press:
+   browsers only open file pickers in response to one. */
+#dialog-bar {
+  position: fixed;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: calc(100vw - 24px);
+  padding: 8px 8px 8px 14px;
+  background: rgba(24, 23, 29, 0.96);
+  border: 1px solid #2f2d38;
+  border-radius: 10px;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.45);
+}
+#dialog-bar[hidden] { display: none; }
+#dialog-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+#dialog-bar button {
+  flex: none;
+  padding: 6px 14px;
+  font: inherit;
+  color: var(--fg);
+  background: #2a2833;
+  border: 0;
+  border-radius: 6px;
+  cursor: pointer;
+}
+#dialog-bar #dialog-ok { color: #fff; background: var(--accent); font-weight: 600; }
+#dialog-bar button:hover { filter: brightness(1.1); }
+#dialog-bar button:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
