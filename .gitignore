@@ -2,5 +2,5 @@ build/
 build-log.txt
 node_modules/
 .DS_Store
-dist/love.wasm
-dist/love.mjs
+# Build output (python3 build.py)
+dist/
