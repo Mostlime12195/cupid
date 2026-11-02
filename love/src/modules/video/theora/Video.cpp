@@ -25,6 +25,9 @@
 #include "Video.h"
 #include "common/delay.h"
 #include "timer/Timer.h"
+#ifdef LOVE_EMSCRIPTEN
+#include "thread/web/GreenThreads.h"
+#endif
 
 namespace love
 {
@@ -37,11 +40,20 @@ Video::Video()
 	: love::video::Video("love.video.theora")
 {
 	workerThread = new Worker();
+#ifdef LOVE_EMSCRIPTEN
+	// No OS threads on the web: decode from the frame loop instead (like the
+	// audio pool), which runs every animation frame and on a timer.
+	workerTask = thread::web::addFrameTask([this]() { workerThread->update(); });
+#else
 	workerThread->start();
+#endif
 }
 
 Video::~Video()
 {
+#ifdef LOVE_EMSCRIPTEN
+	thread::web::removeFrameTask(workerTask);
+#endif
 	delete workerThread;
 }
 
@@ -118,6 +130,31 @@ void Worker::threadFunction()
 		}
 	}
 }
+
+#ifdef LOVE_EMSCRIPTEN
+void Worker::update()
+{
+	love::thread::Lock l(mutex);
+
+	// Like threadFunction, the clock only runs while there are streams.
+	double curFrame = love::timer::Timer::getTime();
+	double dt = (streams.empty() || lastFrame < 0.0) ? 0.0 : curFrame-lastFrame;
+	lastFrame = curFrame;
+
+	for (auto it = streams.begin(); it != streams.end(); ++it)
+	{
+		TheoraVideoStream *stream = *it;
+		if (stream->getReferenceCount() == 1)
+		{
+			// We're the only ones left
+			streams.erase(it);
+			break;
+		}
+
+		stream->threadedFillBackBuffer(dt);
+	}
+}
+#endif
 
 } // theora
 } // video

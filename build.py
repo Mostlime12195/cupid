@@ -23,6 +23,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 LOVE = ROOT / "love"
 LUA = ROOT / "deps" / "lua-5.1.5"
+THEORA = ROOT / "deps" / "theora"
 WEB = ROOT / "web"
 BUILD = ROOT / "build"
 DIST = ROOT / "dist"
@@ -48,6 +49,7 @@ LOVE_TARGETS = [
     "love_thread_root", "love_thread_sdl",
     "love_timer",
     "love_touch_root", "love_touch_sdl",
+    "love_video_root", "love_video_theora",
     "love_window_root", "love_window_sdl",
     "liblove",
     "love_3p_box2d", "love_3p_ddsparse", "love_3p_glad", "love_3p_glslang",
@@ -77,6 +79,7 @@ COMMON_FLAGS = [
     "-I" + str(LOVE / "src" / "libraries" / "box2d" / "include"),
     "-I" + str(LOVE / "src" / "libraries" / "glslang"),
     "-I" + str(LUA),
+    "-I" + str(THEORA / "include"),
     "-w",
 ] + PORTS
 
@@ -111,7 +114,6 @@ def cmake_sources():
 
 # Individual files needed from targets that are otherwise left out.
 EXTRA_SOURCES = [
-    "src/modules/video/VideoStream.cpp",  # graphics references the base type
     "src/modules/thread/web/GreenThreads.cpp",
 ]
 
@@ -120,6 +122,11 @@ def lua_sources():
     skip = {"lua.c", "luac.c", "print.c"}
     lua = sorted(p for p in LUA.glob("*.c") if p.name not in skip)
     return lua + [ROOT / "deps" / "luabitop" / "bit.c"]
+
+
+def theora_sources():
+    """libtheora's decoder (lib/Makefile.am decoder_sources, minus the legacy API wrappers)."""
+    return sorted((THEORA / "lib").glob("*.c"))
 
 
 def web_sources():
@@ -187,7 +194,7 @@ def main():
     if args.debug:
         BUILD.joinpath("debug").mkdir(parents=True, exist_ok=True)
 
-    sources = cmake_sources() + [LOVE / f for f in EXTRA_SOURCES] + lua_sources() + web_sources()
+    sources = cmake_sources() + [LOVE / f for f in EXTRA_SOURCES] + lua_sources() + theora_sources() + web_sources()
     todo = [s for s in sources if needs_rebuild(s, obj_path(s))]
     print(f"{len(sources)} sources, {len(todo)} to compile")
 
