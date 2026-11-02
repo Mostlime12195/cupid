@@ -53,6 +53,7 @@ LOVE_TARGETS = [
     "love_3p_box2d", "love_3p_ddsparse", "love_3p_glad", "love_3p_glslang",
     "love_3p_lodepng", "love_3p_lua53", "love_3p_lz4", "love_3p_noise1234",
     "love_3p_physfs", "love_3p_wuff", "love_3p_xxhash",
+    "love_3p_luahttps",
 ]
 
 # Files listed by CMake that must not be built for the web.
@@ -113,6 +114,7 @@ def cmake_sources():
 EXTRA_SOURCES = [
     "src/modules/video/VideoStream.cpp",  # graphics references the base type
     "src/modules/thread/web/GreenThreads.cpp",
+    "src/libraries/luahttps/src/emscripten/EmscriptenClient.cpp",
 ]
 
 

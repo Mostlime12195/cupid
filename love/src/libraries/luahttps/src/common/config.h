@@ -22,6 +22,10 @@
 			#define HTTPS_BACKEND_CURL
 		#endif
 	#endif
+#elif defined(__EMSCRIPTEN__)
+	// LÖVE web: requests go through the browser (synchronous XMLHttpRequest).
+	#define HTTPS_BACKEND_EMSCRIPTEN
+	#define HTTPS_LIBRARY_LOADER_LINKTIME
 #elif defined(__ANDROID__)
 	#define HTTPS_BACKEND_ANDROID
 	#define HTTPS_LIBRARY_LOADER_UNIX
