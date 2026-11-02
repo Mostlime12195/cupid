@@ -50,6 +50,9 @@ public:
 
 private:
 	Worker *workerThread;
+#ifdef LOVE_EMSCRIPTEN
+	int workerTask = 0;
+#endif
 }; // Video
 
 class Worker : public love::thread::Threadable
@@ -65,6 +68,11 @@ public:
 	// Frees itself!
 	void stop();
 
+#ifdef LOVE_EMSCRIPTEN
+	// One iteration of threadFunction, run from the frame loop.
+	void update();
+#endif
+
 private:
 
 	std::vector<StrongRef<TheoraVideoStream>> streams;
@@ -73,6 +81,9 @@ private:
 	love::thread::ConditionalRef cond;
 
 	bool stopping;
+#ifdef LOVE_EMSCRIPTEN
+	double lastFrame = -1.0;
+#endif
 }; // Worker
 
 } // theora

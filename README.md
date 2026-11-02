@@ -16,6 +16,7 @@ decoding, and save files.
 | `dist/` | Ready-to-host build output: `index.html` (editor), `player.html`, `love.mjs` + `love.wasm` (engine), `examples/` |
 | `love/` | LÖVE source (upstream commit `ef388d4`) with web patches |
 | `deps/lua-5.1.5/` | PUC Lua 5.1.5 (LuaJIT can't target WebAssembly) |
+| `deps/theora/` | libtheora 1.2.0 decoder, for `love.video` |
 | `web/native/` | Web entry point (`web_main.cpp`) replacing LÖVE's blocking `main()` |
 | `web/player/` | The player page (standalone and embeddable) |
 | `web/editor/` | The editor (LÖVE Web Studio) |
@@ -23,7 +24,7 @@ decoding, and save files.
 | `build.py` | Build script (reads source lists from `love/CMakeLists.txt`) |
 | `serve.py` | Local dev server |
 | `package.py` | Command-line web export for a game folder or `.love` |
-| `tools/` | Test games: `bench` (benchmark), `smoke` (feature checks), `threads` |
+| `tools/` | Test games: `bench` (benchmark), `smoke` (feature checks), `threads`, `video` |
 
 ## Compared to love.js
 
@@ -76,7 +77,7 @@ shader compiler, HarfBuzz text shaping and a Noto Sans default font.
 
 | | love.js 11.4.1 | This project |
 | --- | --- | --- |
-| Engine (`.wasm`), gzip | 1.63 MB | 2.49 MB |
+| Engine (`.wasm`), gzip | 1.63 MB | 2.52 MB |
 | Glue JS, gzip | 0.07 MB | 0.06 MB |
 
 ## Threads without SharedArrayBuffer
@@ -188,7 +189,6 @@ Player URL options:
 
 ## Not supported
 
-- `love.video` (no Theora port for Emscripten yet).
 - Networking modules: `socket` (LuaSocket), `enet`, `https`.
 - `love.window.showFileDialog`.
 - WOFF2 fonts (FreeType is built without Brotli); TTF and OTF work.
@@ -207,13 +207,17 @@ its boot coroutine in a `while` loop. `boot.lua` yields once per iteration of
 The engine patches (`git diff dca79b4 -- love deps`) are kept small so they
 can be rebased onto newer LÖVE commits:
 
-- Add an `LOVE_EMSCRIPTEN` platform (`config.h`) and leave out video and
-  networking.
+- Add an `LOVE_EMSCRIPTEN` platform (`config.h`) and leave out networking.
 - WebGL 2 differences: no texture swizzle (LA8 textures use
   `LUMINANCE_ALPHA`), no `GL_FRAMEBUFFER_SRGB` toggle.
 - `love.timer` uses `emscripten_get_now`; sleeping doesn't block.
 - Green threads for `love.thread` (above); audio streaming refills from the
   frame loop and a timer instead of a pool thread, and recovers from underruns.
+- `love.video` decodes Theora from the frame loop too, instead of its worker
+  thread. libtheora's decoder is built from source (`deps/theora`, without
+  its x86/ARM assembly); libogg is Emscripten's port.
+- A streaming Source seeked while paused or stopped no longer skips ahead
+  when played again (this showed up as a video with audio jumping ahead).
 - `boot.lua` skips modules the build doesn't include.
 - LuaBitOp (`deps/luabitop`) is loaded as the global `bit`, as on LuaJIT.
 - SDL3 text input is started when the window is created.
@@ -222,6 +226,7 @@ can be rebased onto newer LÖVE commits:
 
 LÖVE is under the zlib license (`love/license.txt`); its bundled libraries
 keep their own licenses. Lua 5.1 is MIT (`deps/lua-5.1.5/COPYRIGHT`), as is
-LuaBitOp (`deps/luabitop/bit.c`).
+LuaBitOp (`deps/luabitop/bit.c`). libtheora is BSD-style
+(`deps/theora/COPYING`).
 Changes in this repository are marked in the source and follow the same
 licenses.
