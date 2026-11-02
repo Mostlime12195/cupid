@@ -1,0 +1,16 @@
+local function f() local x = nil; return x.y end
+print(pcall(f))
+print(pcall(function() return 1 + {} end))
+print(pcall(function() return #nil end))
+print(pcall(function() return ("x") .. {} end))
+print(pcall(function() local t = setmetatable({}, { __index = function() error("deep", 2) end }); return t.k end))
+print(pcall(error, { code = 1 }))
+print(select(2, pcall(error, "msg", 0)))
+print(xpcall(function() error("boom") end, function(m) return "handled: " .. m end))
+local ok, tb = xpcall(function() local a = {} ; return a.b.c end, debug.traceback)
+print(ok, (tb:gsub("\n.*", "")))
+local function lvl() return debug.getinfo(1, "l").currentline end
+print(lvl())
+print(pcall(string.rep))
+print(pcall(function() undefinedfn() end))
+print(pcall(function() local s = "a" ; return s < 1 end))

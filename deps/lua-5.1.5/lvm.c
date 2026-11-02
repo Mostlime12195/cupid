@@ -25,6 +25,7 @@
 #include "ltable.h"
 #include "ltm.h"
 #include "lvm.h"
+#include "ljit.h"
 
 
 
@@ -361,6 +362,21 @@ static void Arith (lua_State *L, StkId ra, const TValue *rb,
 #define Protect(x)	{ L->savedpc = pc; {x;}; base = L->base; }
 
 
+/* LÖVE web: on a loop's back edge, switch a hot function to compiled code
+   (see ljit.inc). */
+#if LJIT_ENABLED
+#define ljit_backedge(L,cl,pc) \
+  if (ljit_enabled && cl->p->jit >= 0 && \
+      !(L->hookmask & (LUA_MASKLINE | LUA_MASKCOUNT)) && \
+      (cl->p->jit > 0 || ++cl->p->jitcount >= ljit_threshold)) { \
+    L->savedpc = pc; \
+    goto reentry; \
+  }
+#else
+#define ljit_backedge(L,cl,pc)
+#endif
+
+
 #define arith_op(op,tm) { \
         TValue *rb = RKB(i); \
         TValue *rc = RKC(i); \
@@ -389,6 +405,31 @@ void luaV_execute (lua_State *L, int nexeccalls) {
   cl = &clvalue(L->ci->func)->l;
   base = L->base;
   k = cl->p->k;
+#if LJIT_ENABLED
+  if (ljit_enabled && !(L->hookmask & (LUA_MASKLINE | LUA_MASKCOUNT))) {
+    Proto *jp = cl->p;
+    if (jp->jit > 0 || (jp->jit == 0 && ++jp->jitcount >= ljit_threshold &&
+                        ljit_compile(L, jp))) {
+      int r = ((ljit_Function)(size_t)jp->jit)(L);
+      nexeccalls += ljit_pending;  /* frames it entered that we now own */
+      ljit_pending = 0;
+      switch (r) {
+        case LJIT_CALL: nexeccalls++; goto reentry;
+        case LJIT_TAILCALL: goto reentry;
+        case LJIT_RET1:
+          if (--nexeccalls == 0) return;
+          L->top = L->ci->top;
+          goto reentry;
+        case LJIT_RET0:
+          if (--nexeccalls == 0) return;
+          goto reentry;
+        case LJIT_YIELD: return;
+        default:  /* LJIT_INTERP: a hook was set; interpret L->ci from here */
+          goto reentry;
+      }
+    }
+  }
+#endif
   /* main loop of interpreter */
   for (;;) {
     const Instruction i = *pc++;
@@ -544,6 +585,7 @@ void luaV_execute (lua_State *L, int nexeccalls) {
       }
       case OP_JMP: {
         dojump(L, pc, GETARG_sBx(i));
+        if (GETARG_sBx(i) < 0) ljit_backedge(L, cl, pc);
         continue;
       }
       case OP_EQ: {
@@ -664,6 +706,7 @@ void luaV_execute (lua_State *L, int nexeccalls) {
           dojump(L, pc, GETARG_sBx(i));  /* jump back */
           setnvalue(ra, idx);  /* update internal index... */
           setnvalue(ra+3, idx);  /* ...and external index */
+          ljit_backedge(L, cl, pc);
         }
         continue;
       }
@@ -694,6 +737,9 @@ void luaV_execute (lua_State *L, int nexeccalls) {
         if (!ttisnil(cb)) {  /* continue loop? */
           setobjs2s(L, cb-1, cb);  /* save control variable */
           dojump(L, pc, GETARG_sBx(*pc));  /* jump back */
+          pc++;
+          ljit_backedge(L, cl, pc);
+          continue;
         }
         pc++;
         continue;
@@ -769,3 +815,6 @@ void luaV_execute (lua_State *L, int nexeccalls) {
   }
 }
 
+
+/* LÖVE web: the JIT needs this file's static functions and macros. */
+#include "ljit.inc"

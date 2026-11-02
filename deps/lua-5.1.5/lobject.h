@@ -250,6 +250,10 @@ typedef struct Proto {
   lu_byte numparams;
   lu_byte is_vararg;
   lu_byte maxstacksize;
+  /* LÖVE web JIT (ljit.inc): function table index of the compiled code,
+     0 if not compiled, -1 if it can't be. */
+  int jit;
+  int jitcount;
 } Proto;
 
 

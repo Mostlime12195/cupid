@@ -138,9 +138,10 @@ def needs_rebuild(src: Path, obj: Path) -> bool:
     dep = obj.with_suffix(".d")
     if not dep.exists():
         return True
-    deps = dep.read_text().replace("\\\n", " ").split(":", 1)[-1].split()
+    # Make-style depfile: escaped newlines, and spaces in paths escaped as "\ ".
+    text = dep.read_text().replace("\\\n", " ").split(": ", 1)[-1]
+    deps = [d.replace("\\ ", " ") for d in re.split(r"(?<!\\)\s+", text) if d]
     for d in deps:
-        d = d.replace("\\ ", " ")
         try:
             if os.stat(d).st_mtime > t:
                 return True
@@ -212,14 +213,16 @@ def main():
         "em++", *objs, *COMMON_FLAGS, *opt,
         "-lopenal", "-lidbfs.js",
         "--js-library", str(WEB / "native" / "library_love.js"),
+        "--js-library", str(WEB / "native" / "library_ljit.js"),
         "-sMODULARIZE=1", "-sEXPORT_ES6=1", "-sEXPORT_NAME=createLove",
         "-sENVIRONMENT=web",
         "-sALLOW_MEMORY_GROWTH=1", "-sINITIAL_MEMORY=64MB", "-sSTACK_SIZE=2MB",
+        "-sALLOW_TABLE_GROWTH=1",  # Lua JIT adds compiled functions
         "-sMAX_WEBGL_VERSION=2", "-sMIN_WEBGL_VERSION=2", "-sFULL_ES3=1",
         "-sGL_ENABLE_GET_PROC_ADDRESS=1",
         "-sFORCE_FILESYSTEM=1",
         "-sEXPORTED_RUNTIME_METHODS=FS,IDBFS,callMain,ccall,cwrap,HEAPU8",
-        "-sEXPORTED_FUNCTIONS=_main,_malloc,_free,_loveweb_quit,_loveweb_set_paused,_loveweb_fit_window",
+        "-sEXPORTED_FUNCTIONS=_main,_malloc,_free,_loveweb_quit,_loveweb_set_paused,_loveweb_fit_window,_ljit_configure,_ljit_stats",
         "-sINVOKE_RUN=0", "-sEXIT_RUNTIME=0",
         "-o", str(out_dir / "love.mjs"),
     ] + (["--profiling-funcs"] if args.profiling else [])

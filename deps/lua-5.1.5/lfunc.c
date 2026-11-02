@@ -13,6 +13,7 @@
 #include "lua.h"
 
 #include "lfunc.h"
+#include "ljit.h"
 #include "lgc.h"
 #include "lmem.h"
 #include "lobject.h"
@@ -133,12 +134,15 @@ Proto *luaF_newproto (lua_State *L) {
   f->locvars = NULL;
   f->linedefined = 0;
   f->lastlinedefined = 0;
+  f->jit = 0;
+  f->jitcount = 0;
   f->source = NULL;
   return f;
 }
 
 
 void luaF_freeproto (lua_State *L, Proto *f) {
+  ljit_free(f);
   luaM_freearray(L, f->code, f->sizecode, Instruction);
   luaM_freearray(L, f->p, f->sizep, Proto *);
   luaM_freearray(L, f->k, f->sizek, TValue);
