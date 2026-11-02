@@ -188,8 +188,19 @@ EMSCRIPTEN_KEEPALIVE void loveweb_set_paused(int p)
 	paused = p != 0;
 }
 
-EMSCRIPTEN_KEEPALIVE void loveweb_push_event(const char *)
+// Resizes a resizable game window to fill the page, like a maximized desktop
+// window. Returns 0 (and does nothing) if the game's window isn't resizable.
+EMSCRIPTEN_KEEPALIVE int loveweb_fit_window(int w, int h)
 {
+	SDL_Window *window = SDL_GL_GetCurrentWindow();
+	if (window == nullptr || (SDL_GetWindowFlags(window) & SDL_WINDOW_RESIZABLE) == 0)
+		return 0;
+
+	int curw = 0, curh = 0;
+	SDL_GetWindowSize(window, &curw, &curh);
+	if (curw != w || curh != h)
+		SDL_SetWindowSize(window, w, h);
+	return 1;
 }
 
 } // extern "C"

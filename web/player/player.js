@@ -7,7 +7,10 @@
 //
 // Messages sent to the embedding page all carry source: 'love-player':
 //   ready, started, log {level, text}, error {text}, quit {code}, title {title}
-import createLove from './love.mjs';
+// build.py replaces this with a hash of the engine files, so browsers never
+// combine a cached love.wasm with a newer love.mjs (or vice versa).
+const BUILD = '__LOVE_BUILD__';
+const { default: createLove } = await import(`./love.mjs?v=${BUILD}`);
 
 const SAVE_ROOT = '/home/web_user/.local/share/love';
 const GAME_DIR = '/game';
@@ -95,13 +98,22 @@ function fail(text) {
 
 function fitCanvas() {
   const dpr = window.devicePixelRatio || 1;
+  const sw = window.innerWidth;
+  const sh = window.innerHeight;
+
+  // Resizable games get the whole page, like a maximized desktop window
+  // (they receive love.resize). Fixed-size games are scaled to fit.
+  if (running && Module?._loveweb_fit_window?.(sw, sh)) {
+    canvas.style.setProperty('--fit-w', `${sw}px`);
+    canvas.style.setProperty('--fit-h', `${sh}px`);
+    return;
+  }
+
   // SDL keeps the backing store at pixel size; the logical size is what the
   // game asked for, which SDL writes as the element's inline CSS size.
   const w = parseFloat(canvas.style.width) || canvas.width;
   const h = parseFloat(canvas.style.height) || canvas.height;
   if (!w || !h) return;
-  const sw = window.innerWidth;
-  const sh = window.innerHeight;
   let scale = Math.min(sw / w, sh / h);
   if (scaleMode === 'integer') scale = Math.max(1, Math.floor(scale * dpr) / dpr);
   else if (scaleMode === 'none') scale = 1;
@@ -127,6 +139,7 @@ let syncing = false;
 
 const engineReady = createLove({
   canvas,
+  locateFile: (path, prefix) => `${prefix}${path}?v=${BUILD}`,
   print: (t) => output('out', t),
   printErr: (t) => output('err', t),
   onLoveQuit: (code) => onQuit(code),

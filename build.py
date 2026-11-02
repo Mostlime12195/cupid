@@ -12,6 +12,7 @@ a source or one of its headers changes.
 """
 import argparse
 import concurrent.futures as cf
+import hashlib
 import os
 import re
 import shutil
@@ -217,7 +218,7 @@ def main():
         "-sGL_ENABLE_GET_PROC_ADDRESS=1",
         "-sFORCE_FILESYSTEM=1",
         "-sEXPORTED_RUNTIME_METHODS=FS,IDBFS,callMain,ccall,cwrap,HEAPU8",
-        "-sEXPORTED_FUNCTIONS=_main,_malloc,_free,_loveweb_push_event,_loveweb_quit,_loveweb_set_paused",
+        "-sEXPORTED_FUNCTIONS=_main,_malloc,_free,_loveweb_quit,_loveweb_set_paused,_loveweb_fit_window",
         "-sINVOKE_RUN=0", "-sEXIT_RUNTIME=0",
         "-o", str(out_dir / "love.mjs"),
     ] + (["--profiling-funcs"] if args.profiling else [])
@@ -232,12 +233,24 @@ def main():
         copy_web()
 
 
+def build_id():
+    h = hashlib.sha1()
+    for f in ("love.mjs", "love.wasm"):
+        p = DIST / f
+        if p.exists():
+            h.update(p.read_bytes())
+    return h.hexdigest()[:12]
+
+
 def copy_web():
     """Copy the player, editor and examples next to the engine."""
     for sub in ("player", "editor", "dev"):
         src = WEB / sub
         if src.exists():
             shutil.copytree(src, DIST, dirs_exist_ok=True)
+    player = DIST / "player.js"
+    if player.exists():
+        player.write_text(player.read_text().replace("__LOVE_BUILD__", build_id()))
     if (WEB / "examples").exists():
         shutil.copytree(WEB / "examples", DIST / "examples", dirs_exist_ok=True)
 

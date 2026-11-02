@@ -4,6 +4,7 @@ local hearts = {}
 function love.load()
   love.graphics.setBackgroundColor(0.11, 0.1, 0.14)
   font = love.graphics.newFont(28)
+  small = love.graphics.newFont(14)
 end
 
 function love.update(dt)
@@ -37,6 +38,6 @@ function love.draw()
   love.graphics.setColor(1, 1, 1)
   love.graphics.setFont(font)
   love.graphics.printf("Hello, LÖVE " .. table.concat({ love.getVersion() }, ".", 1, 3), 0, 40, w, "center")
-  love.graphics.setNewFont(14)
+  love.graphics.setFont(small)
   love.graphics.print(("FPS: %d   Click to make hearts"):format(love.timer.getFPS()), 10, h - 24)
 end
