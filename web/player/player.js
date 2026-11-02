@@ -137,9 +137,46 @@ let Module = null;
 let running = false;
 let syncing = false;
 
+// Combined download progress of the engine and the game.
+const downloads = { engine: [0, 0], game: [0, 0] };
+
+function showDownloadProgress() {
+  if (running || overlay.hidden) return;
+  const loaded = downloads.engine[0] + downloads.game[0];
+  const total = downloads.engine[1] + downloads.game[1];
+  if (total > 0 && loaded < total)
+    showStatus(`Loading… ${(loaded / 1e6).toFixed(1)} / ${(total / 1e6).toFixed(1)} MB`, { progress: loaded / total });
+}
+
+// Size of a response body as it will be read, or 0 if unknown (compressed
+// responses report the compressed length).
+function bodySize(res) {
+  return res.headers.get('content-encoding') ? 0 : Number(res.headers.get('content-length')) || 0;
+}
+
+// Downloads the engine with progress, compiling it while it streams in.
+function instantiateEngine(imports, done) {
+  fetch(new URL(`love.wasm?v=${BUILD}`, import.meta.url)).then((res) => {
+    if (!res.ok) throw new Error(`love.wasm: ${res.status} ${res.statusText}`);
+    downloads.engine[1] = bodySize(res);
+    const counted = res.body.pipeThrough(new TransformStream({
+      transform(chunk, controller) {
+        downloads.engine[0] += chunk.length;
+        showDownloadProgress();
+        controller.enqueue(chunk);
+      },
+    }));
+    const wasm = new Response(counted, { headers: { 'Content-Type': 'application/wasm' } });
+    return WebAssembly.instantiateStreaming(wasm, imports);
+  }).then(({ instance, module }) => done(instance, module))
+    .catch((e) => fail(`Could not load the LÖVE engine.\n${e?.message || e}`));
+  return {};
+}
+
 const engineReady = createLove({
   canvas,
   locateFile: (path, prefix) => `${prefix}${path}?v=${BUILD}`,
+  instantiateWasm: instantiateEngine,
   print: (t) => output('out', t),
   printErr: (t) => output('err', t),
   onLoveQuit: (code) => onQuit(code),
@@ -253,8 +290,8 @@ async function fetchWithProgress(url) {
   // Revalidate so an updated game is never served stale from the HTTP cache.
   const res = await fetch(url, { cache: 'no-cache' });
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
-  const total = Number(res.headers.get('content-length')) || 0;
-  if (!res.body || !total) return new Uint8Array(await res.arrayBuffer());
+  downloads.game[1] = bodySize(res);
+  if (!res.body) return new Uint8Array(await res.arrayBuffer());
   const reader = res.body.getReader();
   const chunks = [];
   let received = 0;
@@ -263,7 +300,8 @@ async function fetchWithProgress(url) {
     if (done) break;
     chunks.push(value);
     received += value.length;
-    showStatus(`Downloading game… ${(received / 1e6).toFixed(1)} / ${(total / 1e6).toFixed(1)} MB`, { progress: received / total });
+    downloads.game[0] = received;
+    showDownloadProgress();
   }
   const out = new Uint8Array(received);
   let off = 0;
