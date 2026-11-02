@@ -76,9 +76,14 @@ COMMON_FLAGS = [
     "-I" + str(LOVE / "src" / "libraries" / "box2d" / "include"),
     "-I" + str(LOVE / "src" / "libraries" / "glslang"),
     "-I" + str(LUA),
-    "-I" + os.path.join(subprocess.run(["em-config", "CACHE"], capture_output=True, text=True).stdout.strip() or ".", "sysroot", "include", "AL"),
     "-w",
 ] + PORTS
+
+
+def emscripten_includes():
+    """Emscripten's OpenAL headers live in sysroot/include/AL; LÖVE includes them bare."""
+    cache = subprocess.run(["em-config", "CACHE"], capture_output=True, text=True).stdout.strip()
+    return ["-I" + os.path.join(cache, "sysroot", "include", "AL")]
 
 
 def cmake_sources():
@@ -162,11 +167,16 @@ def main():
     ap.add_argument("--debug", action="store_true")
     ap.add_argument("-j", type=int, default=os.cpu_count())
     ap.add_argument("--only-compile", action="store_true")
+    ap.add_argument("--web-only", action="store_true", help="only copy player/editor files")
     args = ap.parse_args()
 
+    if args.web_only:
+        copy_web()
+        return
     if not shutil.which("emcc"):
         sys.exit("emcc not found: source emsdk_env.sh first")
 
+    COMMON_FLAGS.extend(emscripten_includes())
     opt = ["-O0", "-g", "-sASSERTIONS=1"] if args.debug else ["-O3", "-flto"]
     if args.debug:
         BUILD.joinpath("debug").mkdir(parents=True, exist_ok=True)
@@ -213,6 +223,17 @@ def main():
     for f in ("love.mjs", "love.wasm"):
         p = DIST / f
         print(f"  {f}: {p.stat().st_size / 1e6:.2f} MB")
+    copy_web()
+
+
+def copy_web():
+    """Copy the player, editor and examples next to the engine."""
+    for sub in ("player", "editor"):
+        src = WEB / sub
+        if src.exists():
+            shutil.copytree(src, DIST, dirs_exist_ok=True)
+    if (WEB / "examples").exists():
+        shutil.copytree(WEB / "examples", DIST / "examples", dirs_exist_ok=True)
 
 
 if __name__ == "__main__":

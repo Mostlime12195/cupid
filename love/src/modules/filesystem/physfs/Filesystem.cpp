@@ -706,7 +706,7 @@ std::string Filesystem::getFullCommonPath(CommonPath path)
 		break;
 	}
 
-#elif defined(LOVE_LINUX)
+#elif defined(LOVE_LINUX) || defined(LOVE_EMSCRIPTEN)
 
 	const char *xdgdir = nullptr;
 
