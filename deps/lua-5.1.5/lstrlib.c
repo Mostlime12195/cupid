@@ -91,13 +91,16 @@ static int str_upper (lua_State *L) {
 }
 
 static int str_rep (lua_State *L) {
-  size_t l;
+  size_t l, lsep;
   luaL_Buffer b;
   const char *s = luaL_checklstring(L, 1, &l);
   int n = luaL_checkint(L, 2);
+  const char *sep = luaL_optlstring(L, 3, "", &lsep);  /* LuaJIT / Lua 5.2 */
   luaL_buffinit(L, &b);
-  while (n-- > 0)
+  while (n-- > 0) {
     luaL_addlstring(&b, s, l);
+    if (n > 0 && lsep > 0) luaL_addlstring(&b, sep, lsep);
+  }
   luaL_pushresult(&b);
   return 1;
 }
@@ -693,6 +696,30 @@ static int str_gsub (lua_State *L) {
 #define MAX_FORMAT	(sizeof(FLAGS) + sizeof(LUA_INTFRMLEN) + 10)
 
 
+/* %s accepts any value and uses __tostring, like tostring (LuaJIT / Lua 5.2) */
+static const char *tostringarg (lua_State *L, int arg, size_t *l) {
+  if (luaL_callmeta(L, arg, "__tostring")) {
+    if (!lua_isstring(L, -1))
+      luaL_error(L, LUA_QL("__tostring") " must return a string");
+    lua_replace(L, arg);
+  }
+  else if (!lua_isstring(L, arg)) {
+    luaL_checkany(L, arg);
+    switch (lua_type(L, arg)) {
+      case LUA_TNIL: lua_pushliteral(L, "nil"); break;
+      case LUA_TBOOLEAN:
+        lua_pushstring(L, lua_toboolean(L, arg) ? "true" : "false");
+        break;
+      default:
+        lua_pushfstring(L, "%s: %p", luaL_typename(L, arg), lua_topointer(L, arg));
+        break;
+    }
+    lua_replace(L, arg);
+  }
+  return lua_tolstring(L, arg, l);
+}
+
+
 static void addquoted (lua_State *L, luaL_Buffer *b, int arg) {
   size_t l;
   const char *s = luaL_checklstring(L, arg, &l);
@@ -788,7 +815,7 @@ static int str_format (lua_State *L) {
           break;
         }
         case 'e':  case 'E': case 'f':
-        case 'g': case 'G': {
+        case 'g': case 'G': case 'a': case 'A': {
           sprintf(buff, form, (double)luaL_checknumber(L, arg));
           break;
         }
@@ -798,7 +825,7 @@ static int str_format (lua_State *L) {
         }
         case 's': {
           size_t l;
-          const char *s = luaL_checklstring(L, arg, &l);
+          const char *s = tostringarg(L, arg, &l);
           if (!strchr(form, '.') && l >= 100) {
             /* no precision and string is too long to be formatted;
                keep original string */

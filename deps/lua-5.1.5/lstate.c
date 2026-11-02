@@ -98,6 +98,7 @@ static void preinit_state (lua_State *L, global_State *g) {
   L->base_ci = L->ci = NULL;
   L->savedpc = NULL;
   L->errfunc = 0;
+  L->pcallparent = NULL;
   setnilvalue(gt(L));
 }
 
@@ -174,6 +175,8 @@ LUA_API lua_State *lua_newstate (lua_Alloc f, void *ud) {
   g->grayagain = NULL;
   g->weak = NULL;
   g->tmudata = NULL;
+  g->pcallc = g->xpcallc = NULL;
+  g->pcalll = g->xpcalll = NULL;
   g->totalbytes = sizeof(LG);
   g->gcpause = LUAI_GCPAUSE;
   g->gcstepmul = LUAI_GCMUL;

@@ -14,6 +14,7 @@ import { initLayout } from './layout.js';
 import { BLANK, loadExampleIndex, loadTemplateFiles } from './templates.js';
 import { buildLove, buildWebExport, unzipToProjectFiles, slugify } from './exporter.js';
 import { createShareLink, readShareHash } from './share.js';
+import { checkProject } from './compat.js';
 
 const $ = (sel) => document.querySelector(sel);
 const LS = {
@@ -816,6 +817,21 @@ async function collectFiles() {
   return store.getAllFiles(state.project.id);
 }
 
+const COMPAT_KIND = { error: 'danger', warning: 'warning', info: 'info' };
+
+/** Logs web-compatibility issues; returns how many are errors. */
+async function reportCompat(files) {
+  let issues;
+  try {
+    issues = await checkProject(files);
+  } catch (e) {
+    console.warn('Compatibility check failed', e);
+    return 0;
+  }
+  for (const i of issues) consolePanel.info(`${i.path}:${i.line}: ${i.message}`, COMPAT_KIND[i.severity]);
+  return issues.filter((i) => i.severity === 'error').length;
+}
+
 /** focus: give the game keyboard focus once it starts (not for auto-run). */
 async function run({ focus = true } = {}) {
   if (!state.project) return;
@@ -834,6 +850,7 @@ async function run({ focus = true } = {}) {
   renderTabs();
   $('#game-title').textContent = state.project.name;
   runner.run({ files }, { focus });
+  reportCompat(files);
 }
 
 function stop() {
@@ -908,8 +925,10 @@ function toggleGameFullscreen() {
 
 async function exportLove() {
   try {
-    const bytes = await buildLove(await collectFiles());
+    const files = await collectFiles();
+    const bytes = await buildLove(files);
     downloadBlob(new Blob([bytes], { type: 'application/zip' }), `${slugify(state.project.name)}.love`);
+    warnCompat(files);
     toast(`Exported ${slugify(state.project.name)}.love (${formatBytes(bytes.length)})`, { type: 'success' });
   } catch (e) {
     toast(`Export failed: ${e.message}`, { type: 'error' });
@@ -919,12 +938,20 @@ async function exportLove() {
 async function exportWeb() {
   flashStatus('Building web export…');
   try {
-    const bytes = await buildWebExport(await collectFiles(), state.project.name);
+    const files = await collectFiles();
+    const bytes = await buildWebExport(files, state.project.name);
     downloadBlob(new Blob([bytes], { type: 'application/zip' }), `${slugify(state.project.name)}-web.zip`);
+    warnCompat(files);
     toast(`Exported ${slugify(state.project.name)}-web.zip (${formatBytes(bytes.length)}). Upload it to itch.io as an HTML game.`, { type: 'success', timeout: 6000 });
   } catch (e) {
     toast(`Web export failed: ${e.message}`, { type: 'error' });
   }
+}
+
+async function warnCompat(files) {
+  consolePanel.separator(`Web compatibility · ${new Date().toLocaleTimeString()}`);
+  const errors = await reportCompat(files);
+  if (errors) toast(`${errors} part${errors === 1 ? '' : 's'} of this game won't work on the web. See the console.`, { type: 'error', timeout: 6000 });
 }
 
 async function share() {

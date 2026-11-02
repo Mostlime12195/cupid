@@ -42,6 +42,7 @@ LÖVE on the web. Its latest release (11.4.1, 2022) ships LÖVE 11.4.
 | `love.thread` | Compatibility build: `Thread:start()` returns `false`. Threaded build: needs `SharedArrayBuffer`, i.e. COOP/COEP headers | Works on any host, no special headers (see below) |
 | Audio | Compatibility build: "dodgy audio" (its readme) | Streaming refilled from the frame loop and a timer; keeps playing in background tabs |
 | `bit` library (LuaJIT built-in) | Missing | Included (LuaBitOp), as a global and as `require "bit"` |
+| LuaJIT language extensions (`goto`, `\x` escapes, yield inside `pcall`, ...) | Missing | Included (see "Lua compatibility") |
 | Memory | Grows, but the initial size must cover the game's assets (`-m`) | Grows as needed; nothing to configure |
 | Packaging | Node CLI builds a page and data package per game | Any `.love` file runs as is: by URL, drag and drop, or from the editor |
 | Editor | None | Built-in editor with run, console and export |
@@ -184,6 +185,50 @@ Thread gets its own Lua state and runs as a coroutine on the main thread
 
 The trade-off: threads share one CPU core with the game, so they make
 blocking-style code work but don't add parallel speed.
+
+## Lua compatibility
+
+Desktop LÖVE runs LuaJIT, which is Lua 5.1 plus extensions. Smitten runs PUC
+Lua 5.1.5 with the LuaJIT 2.1 extensions that games and libraries commonly
+use added back (`deps/lua-5.1.5`), so code written for desktop LÖVE loads
+and behaves the same:
+
+| Extension | Notes |
+| --- | --- |
+| `goto` and `::labels::` | Lua 5.2 rules: no jumping into a local's scope, labels are visible in nested blocks, `goto continue` to a label at the end of a loop works |
+| `\xXX`, `\z` and `\u{XXXX}` string escapes | |
+| `coroutine.yield` inside `pcall`/`xpcall` | Inside a coroutine the function runs in a child coroutine that passes yields through. `coroutine.running`/`status` report the parent; `xpcall` handlers run at the error, so `debug.traceback` shows the failing code. Outside coroutines `pcall` is the plain C function, at full speed |
+| `load(string [, name [, mode [, env]]])`, `loadfile(name, mode, env)` | |
+| `xpcall(f, handler, ...)` | Passes the extra arguments to `f` |
+| `math.log(x, base)`, `string.rep(s, n, sep)` | |
+| `string.format`: `%s` uses `__tostring` and accepts any value; `%a` | |
+| `table.move`, `require("table.new")`, `require("table.clear")` | |
+| `coroutine.isyieldable`, `package.searchpath`, `os.exit(true/false)` | |
+| `bit` | LuaBitOp, as on LuaJIT |
+
+What can't work in a browser fails with a message that says why, instead of
+a generic error:
+
+- `require("ffi")`, `require("jit")`, `jit.*` modules and `string.buffer`:
+  "isn't available on the web: it's part of LuaJIT ...". The `jit` global is
+  nil, so libraries that check `if jit then` take their plain-Lua path.
+- `require("socket")`, `"enet"` and LuaSocket's other modules: browsers have
+  no raw sockets; use `require("https")`.
+- 64-bit literals (`1LL`, `1ULL`) and imaginary literals (`2i`): a syntax
+  error that names LuaJIT's FFI.
+- Yielding inside a metamethod, a `for ... in` iterator or a C function such
+  as `table.sort`'s comparator: the error says that yielding works inside
+  `pcall` but not there. (LuaJIT allows the first two.)
+
+### Compatibility check
+
+The editor checks a project's Lua files each time it runs or exports, and
+`package.py` does the same when packaging. Problems appear in the console
+(or on stderr) with the file and line: LuaJIT-only and networking modules
+required without `pcall`, 64-bit literals, compute shaders, `io.popen` and
+`os.execute`, unguarded `jit.*` calls, plus notes about
+`love.system.getOS()` returning `"Web"` and threads sharing one core. The
+rules are in `web/editor/compat-rules.json`.
 
 ## The Lua JIT
 
@@ -352,7 +397,8 @@ Player URL options:
 - Networking modules: `socket` (LuaSocket) and `enet` (browsers have no raw
   sockets). `https` works, see above.
 - WOFF2 fonts (FreeType is built without Brotli); TTF and OTF work.
-- LuaJIT itself and its `ffi` library (Lua runs on PUC Lua 5.1 with this project's own JIT; `bit` is provided).
+- LuaJIT itself and its `ffi` library (Lua runs on PUC Lua 5.1 with LuaJIT's
+  language extensions and this project's own JIT; see "Lua compatibility").
 - Compute shaders (WebGL 2 has none).
 
 ## How it works

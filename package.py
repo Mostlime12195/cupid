@@ -10,7 +10,9 @@ game.love, and can be uploaded to any static host. Requires a built dist/
 (python3 build.py).
 """
 import argparse
+import json
 import os
+import re
 import shutil
 import sys
 import zipfile
@@ -19,6 +21,89 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 DIST = ROOT / "dist"
 PLAYER_FILES = ["player.js", "player.css", "love.mjs", "love.wasm"]
+COMPAT_RULES = ROOT / "web" / "editor" / "compat-rules.json"
+
+
+def strip_lua(text: str):
+    """Lua text with comments blanked ('source'), and with comments and string
+    contents blanked ('code'); newlines are kept. Mirrors compat.js."""
+    def blank(s): return re.sub(r"[^\n]", " ", s)
+    def long_end(level, start):
+        end = text.find("]" + "=" * level + "]", start)
+        return len(text) if end < 0 else end + level + 2
+    special = re.compile(r"--|[\"'\[]")
+    long_open = re.compile(r"\[(=*)\[")
+    source, code, i = [], [], 0
+    while True:
+        m = special.search(text, i)
+        if not m:
+            break
+        source.append(text[i:m.start()])
+        code.append(text[i:m.start()])
+        tok = m.group()
+        if tok == "--":
+            lm = long_open.match(text, m.start() + 2)
+            if lm:
+                j = long_end(len(lm.group(1)), lm.end())
+            else:
+                j = text.find("\n", m.start())
+                j = len(text) if j < 0 else j
+            source.append(blank(text[m.start():j]))
+            code.append(blank(text[m.start():j]))
+        elif tok == "[":
+            lm = long_open.match(text, m.start())
+            if not lm:
+                source.append("[")
+                code.append("[")
+                i = m.start() + 1
+                continue
+            j = long_end(len(lm.group(1)), lm.end())
+            source.append(text[m.start():j])
+            code.append(blank(text[m.start():j]))
+        else:  # quoted string
+            j = m.start() + 1
+            while j < len(text) and text[j] != tok and text[j] != "\n":
+                j += 2 if text[j] == "\\" else 1
+            j = min(j + 1, len(text))
+            source.append(text[m.start():j])
+            code.append(blank(text[m.start():j]))
+        i = j
+    source.append(text[i:])
+    code.append(text[i:])
+    return {"source": "".join(source), "code": "".join(code)}
+
+
+def check_compat(love_file: Path):
+    """Prints web-compatibility issues in the game's Lua files; returns the
+    number of errors."""
+    rules = json.loads(COMPAT_RULES.read_text())["rules"]
+    seen, issues = set(), []
+    with zipfile.ZipFile(love_file) as z:
+        for name in sorted(n for n in z.namelist() if n.endswith(".lua")):
+            stripped = strip_lua(z.read(name).decode("utf-8", "replace"))
+            for rule in rules:
+                if rule.get("once") and rule["id"] in seen:
+                    continue
+                if rule.get("unlessFile") and re.search(rule["unlessFile"], stripped["code"]):
+                    continue
+                text = stripped.get(rule["scope"], stripped["code"])
+                for m in re.finditer(rule["pattern"], text):
+                    if stripped["code"][m.start()] != text[m.start()]:
+                        continue  # starts inside a string
+                    start = text.rfind("\n", 0, m.start()) + 1
+                    end = text.find("\n", m.start())
+                    line_text = stripped["source"][start:end if end >= 0 else None]
+                    if rule.get("unless") and re.search(rule["unless"], line_text):
+                        continue
+                    line = text.count("\n", 0, m.start()) + 1
+                    msg = rule["message"].replace("{1}", m.group(1) if m.groups() and m.group(1) else "")
+                    issues.append((name, line, rule["severity"], msg))
+                    seen.add(rule["id"])
+                    if rule.get("once"):
+                        break
+    for name, line, severity, msg in sorted(issues):
+        print(f"{severity}: {name}:{line}: {msg}", file=sys.stderr)
+    return sum(1 for i in issues if i[2] == "error")
 
 
 def make_love(folder: Path, dest: Path):
@@ -52,6 +137,10 @@ def main():
         shutil.copyfile(args.game, args.out / "game.love")
     else:
         sys.exit(f"{args.game} is neither a folder nor a .love file")
+
+    errors = check_compat(args.out / "game.love")
+    if errors:
+        print(f"{errors} part(s) of this game won't work on the web (see above).", file=sys.stderr)
 
     for f in PLAYER_FILES:
         shutil.copyfile(DIST / f, args.out / f)

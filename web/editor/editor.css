@@ -655,6 +655,7 @@ kbd {
 #console-output .line.meta { color: var(--fg-subtle); font-style: italic; }
 #console-output .line.meta.success { color: var(--success); font-style: normal; }
 #console-output .line.meta.danger { color: var(--danger); font-style: normal; }
+#console-output .line.meta.warning { color: var(--warning); font-style: normal; }
 #console-output .line.separator { display: flex; align-items: center; gap: 8px; color: var(--fg-subtle); margin: 6px 0 4px; font-size: 11px; }
 #console-output .line.separator::before, #console-output .line.separator::after { content: ""; height: 1px; background: var(--border); flex: 1; }
 #console-output .error-block { margin: 4px 8px; padding: 8px 10px; border-radius: var(--radius-sm); background: var(--danger-soft); border-left: 3px solid var(--danger); }

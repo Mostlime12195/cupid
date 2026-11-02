@@ -25,10 +25,10 @@ enum RESERVED {
   /* terminal symbols denoted by reserved words */
   TK_AND = FIRST_RESERVED, TK_BREAK,
   TK_DO, TK_ELSE, TK_ELSEIF, TK_END, TK_FALSE, TK_FOR, TK_FUNCTION,
-  TK_IF, TK_IN, TK_LOCAL, TK_NIL, TK_NOT, TK_OR, TK_REPEAT,
+  TK_GOTO, TK_IF, TK_IN, TK_LOCAL, TK_NIL, TK_NOT, TK_OR, TK_REPEAT,
   TK_RETURN, TK_THEN, TK_TRUE, TK_UNTIL, TK_WHILE,
   /* other terminal symbols */
-  TK_CONCAT, TK_DOTS, TK_EQ, TK_GE, TK_LE, TK_NE, TK_NUMBER,
+  TK_CONCAT, TK_DOTS, TK_EQ, TK_GE, TK_LE, TK_NE, TK_DBCOLON, TK_NUMBER,
   TK_NAME, TK_STRING, TK_EOS
 };
 
@@ -64,6 +64,7 @@ typedef struct LexState {
   Mbuffer *buff;  /* buffer for tokens */
   TString *source;  /* current source name */
   char decpoint;  /* locale decimal point */
+  struct Dyndata *dyd;  /* labels and pending gotos (lparser.c) */
 } LexState;
 
 

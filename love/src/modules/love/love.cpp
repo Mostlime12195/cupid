@@ -536,6 +536,40 @@ static void luax_addcompatibilityalias(lua_State *L, const char *module, const c
 	lua_pop(L, 1);
 }
 
+#ifdef LOVE_EMSCRIPTEN
+// require() of a module that can't exist in a browser fails with an
+// explanation instead of a list of files that weren't found.
+static int w_webUnsupportedModule(lua_State *L)
+{
+	return luaL_error(L, "module '%s' isn't available on the web: %s",
+		luaL_optstring(L, 1, "?"), lua_tostring(L, lua_upvalueindex(1)));
+}
+
+static void webPreloadUnsupported(lua_State *L, const char *name, const char *why)
+{
+	lua_getglobal(L, "package");
+	lua_getfield(L, -1, "preload");
+	lua_pushstring(L, why);
+	lua_pushcclosure(L, w_webUnsupportedModule, 1);
+	lua_setfield(L, -2, name);
+	lua_pop(L, 2);
+}
+
+static void webPreloadUnsupportedModules(lua_State *L)
+{
+	const char *ffi = "it's part of LuaJIT, and the browser runs standard Lua 5.1 "
+		"(libraries that check 'if jit then' or use pcall(require, 'ffi') fall back "
+		"to plain Lua automatically)";
+	const char *net = "browsers don't allow raw network sockets "
+		"(use require('https') for HTTP requests)";
+	for (const char *name : {"ffi", "jit", "jit.opt", "jit.util", "jit.profile", "jit.vmdef", "string.buffer"})
+		webPreloadUnsupported(L, name, ffi);
+	for (const char *name : {"socket", "socket.core", "socket.http", "socket.url", "socket.ftp",
+	                         "socket.smtp", "socket.tp", "ltn12", "mime", "mime.core", "enet"})
+		webPreloadUnsupported(L, name, net);
+}
+#endif
+
 int luaopen_love(lua_State *L)
 {
 	// Preload module loaders.
@@ -676,6 +710,7 @@ int luaopen_love(lua_State *L)
 		luaopen_bit(L);
 		lua_settop(L, top);
 	}
+	webPreloadUnsupportedModules(L);
 #endif
 #ifdef LOVE_ENABLE_LUAHTTPS
 	love::luax_preload(L, luaopen_https, "https");

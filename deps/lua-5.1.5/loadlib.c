@@ -371,6 +371,73 @@ static const char *findfile (lua_State *L, const char *name,
 }
 
 
+/* package.searchpath(name, path [, sep [, rep]]) (LuaJIT / Lua 5.2) */
+static int ll_searchpath (lua_State *L) {
+  const char *name = luaL_checkstring(L, 1);
+  const char *path = luaL_checkstring(L, 2);
+  const char *sep = luaL_optstring(L, 3, ".");
+  const char *rep = luaL_optstring(L, 4, LUA_DIRSEP);
+  if (*sep != '\0' && strchr(name, *sep) != NULL)
+    name = luaL_gsub(L, name, sep, rep);
+  lua_pushliteral(L, "");  /* error accumulator */
+  while ((path = pushnexttemplate(L, path)) != NULL) {
+    const char *filename = luaL_gsub(L, lua_tostring(L, -1), LUA_PATH_MARK, name);
+    lua_remove(L, -2);  /* remove path template */
+    if (readable(filename))
+      return 1;
+    lua_pushfstring(L, "\n\tno file " LUA_QS, filename);
+    lua_remove(L, -2);  /* remove file name */
+    lua_concat(L, 2);
+  }
+  lua_pushnil(L);
+  lua_insert(L, -2);
+  return 2;  /* nil plus the list of files tried */
+}
+
+
+/* LuaJIT 2.1's table.new and table.clear, loaded with require */
+static int tab_new (lua_State *L) {
+  lua_createtable(L, luaL_checkint(L, 1), luaL_checkint(L, 2));
+  return 1;
+}
+
+
+static int tab_clear (lua_State *L) {
+  luaL_checktype(L, 1, LUA_TTABLE);
+  lua_pushnil(L);
+  while (lua_next(L, 1)) {
+    lua_pop(L, 1);  /* value */
+    lua_pushvalue(L, -1);
+    lua_pushnil(L);
+    lua_rawset(L, 1);  /* clearing visited keys is allowed during next */
+  }
+  return 0;
+}
+
+
+static int preload_tabfunc (lua_State *L) {
+  lua_CFunction f = (lua_CFunction)lua_touserdata(L, lua_upvalueindex(1));
+  lua_pushcfunction(L, f);
+  lua_getglobal(L, LUA_TABLIBNAME);
+  if (lua_istable(L, -1)) {  /* also make it table.new / table.clear */
+    lua_pushvalue(L, -2);
+    lua_setfield(L, -2, lua_tostring(L, lua_upvalueindex(2)));
+  }
+  lua_pop(L, 1);
+  return 1;
+}
+
+
+static void addtabpreload (lua_State *L, const char *name, lua_CFunction f) {
+  const char *mod = lua_pushfstring(L, "table.%s", name);
+  lua_pushlightuserdata(L, (void *)f);
+  lua_pushstring(L, name);
+  lua_pushcclosure(L, preload_tabfunc, 2);
+  lua_setfield(L, -3, mod);  /* package.preload[mod] */
+  lua_pop(L, 1);  /* mod */
+}
+
+
 static void loaderror (lua_State *L, const char *filename) {
   luaL_error(L, "error loading module " LUA_QS " from file " LUA_QS ":\n\t%s",
                 lua_tostring(L, 1), filename, lua_tostring(L, -1));
@@ -608,6 +675,7 @@ static void setpath (lua_State *L, const char *fieldname, const char *envname,
 
 static const luaL_Reg pk_funcs[] = {
   {"loadlib", ll_loadlib},
+  {"searchpath", ll_searchpath},
   {"seeall", ll_seeall},
   {NULL, NULL}
 };
@@ -657,6 +725,8 @@ LUALIB_API int luaopen_package (lua_State *L) {
   lua_setfield(L, -2, "loaded");
   /* set field `preload' */
   lua_newtable(L);
+  addtabpreload(L, "new", tab_new);
+  addtabpreload(L, "clear", tab_clear);
   lua_setfield(L, -2, "preload");
   lua_pushvalue(L, LUA_GLOBALSINDEX);
   luaL_register(L, NULL, ll_funcs);  /* open lib into global table */

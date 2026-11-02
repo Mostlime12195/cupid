@@ -109,7 +109,21 @@ double now()
 
 bool isYieldable(lua_State *L)
 {
-	return current != nullptr && L == current->co && L->nCcalls <= L->baseCcalls;
+	if (current == nullptr)
+		return false;
+
+	// Code inside pcall runs in a child coroutine that forwards its yields
+	// to the coroutine that called pcall (see lbaselib.c).
+	for (;;)
+	{
+		if (L->nCcalls > L->baseCcalls)
+			return false;
+		if (L == current->co)
+			return true;
+		if (L->pcallparent == nullptr)
+			return false;
+		L = L->pcallparent;
+	}
 }
 
 void countHook(lua_State *L, lua_Debug *)

@@ -214,7 +214,12 @@ static int os_setlocale (lua_State *L) {
 
 
 static int os_exit (lua_State *L) {
-  exit(luaL_optint(L, 1, EXIT_SUCCESS));
+  int status;
+  if (lua_isboolean(L, 1))  /* os.exit(true|false) (LuaJIT / Lua 5.2) */
+    status = lua_toboolean(L, 1) ? EXIT_SUCCESS : EXIT_FAILURE;
+  else
+    status = luaL_optint(L, 1, EXIT_SUCCESS);
+  exit(status);
 }
 
 static const luaL_Reg syslib[] = {

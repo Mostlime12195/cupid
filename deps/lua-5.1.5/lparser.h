@@ -54,6 +54,28 @@ typedef struct upvaldesc {
 struct BlockCnt;  /* defined in lparser.c */
 
 
+/* goto statements and labels (LuaJIT / Lua 5.2 extension) */
+typedef struct Labeldesc {
+  TString *name;  /* label identifier */
+  int pc;  /* position in code */
+  int line;  /* line where it appeared */
+  lu_byte nactvar;  /* local level where it appears in current block */
+  lu_byte close;  /* goto leaves a block whose locals are upvalues */
+} Labeldesc;
+
+typedef struct Labellist {
+  Labeldesc *arr;
+  int n;  /* number of entries in use */
+  int size;  /* array size */
+} Labellist;
+
+/* parser data that outlives a single function; freed by luaD_protectedparser */
+typedef struct Dyndata {
+  Labellist gt;  /* pending (forward) gotos */
+  Labellist label;  /* active labels */
+} Dyndata;
+
+
 /* state needed to generate code for a given function */
 typedef struct FuncState {
   Proto *f;  /* current function header */
@@ -70,13 +92,15 @@ typedef struct FuncState {
   int np;  /* number of elements in `p' */
   short nlocvars;  /* number of elements in `locvars' */
   lu_byte nactvar;  /* number of active local variables */
+  int firstlabel;  /* first label of this function in ls->dyd->label */
+  int firstgoto;  /* first pending goto of this function in ls->dyd->gt */
   upvaldesc upvalues[LUAI_MAXUPVALUES];  /* upvalues */
   unsigned short actvar[LUAI_MAXVARS];  /* declared-variable stack */
 } FuncState;
 
 
 LUAI_FUNC Proto *luaY_parser (lua_State *L, ZIO *z, Mbuffer *buff,
-                                            const char *name);
+                                Dyndata *dyd, const char *name);
 
 
 #endif

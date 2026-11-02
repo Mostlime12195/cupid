@@ -268,11 +268,34 @@ static StkId tryfuncTM (lua_State *L, StkId func) {
    (condhardstacktests(luaD_reallocCI(L, L->size_ci)), ++L->ci))
 
 
+/*
+** Can L yield to its resumer, directly or through pcall children? The main
+** state counts only if `main' is set: LÖVE resumes it to run the whole game
+** loop, and plain pcalls in game code shouldn't pay for being yieldable.
+*/
+int luaD_chainyieldable (lua_State *L, int main) {
+  for (;;) {
+    if (L->baseCcalls == 0 || L->nCcalls > L->baseCcalls) return 0;
+    if (!main && L == G(L)->mainthread) return 0;
+    if (L->pcallparent == NULL) return 1;
+    L = L->pcallparent;
+  }
+}
+
+
 int luaD_precall (lua_State *L, StkId func, int nresults) {
   LClosure *cl;
   ptrdiff_t funcr;
   if (!ttisfunction(func)) /* `func' is not a function? */
     func = tryfuncTM(L, func);  /* check the `function' tag method */
+  if (clvalue(func)->c.isC) {
+    /* pcall/xpcall inside a coroutine: use the yieldable Lua versions */
+    global_State *g = G(L);
+    lua_CFunction f = clvalue(func)->c.f;
+    if ((f == g->pcallc || f == g->xpcallc) && g->pcalll != NULL &&
+        luaD_chainyieldable(L, 0))
+      setclvalue(L, func, f == g->pcallc ? g->pcalll : g->xpcalll);
+  }
   funcr = savestack(L, func);
   cl = &clvalue(func)->l;
   L->ci->savedpc = L->savedpc;
@@ -450,8 +473,12 @@ LUA_API int lua_resume (lua_State *L, int nargs) {
 LUA_API int lua_yield (lua_State *L, int nresults) {
   luai_userstateyield(L, nresults);
   lua_lock(L);
+  if (L->baseCcalls == 0)  /* never resumed (the main state can be, as LÖVE does) */
+    luaG_runerror(L, "attempt to yield from outside a coroutine");
   if (L->nCcalls > L->baseCcalls)
-    luaG_runerror(L, "attempt to yield across metamethod/C-call boundary");
+    luaG_runerror(L, "attempt to yield across metamethod/C-call boundary "
+                     "(yielding works inside pcall, but not inside metamethods, "
+                     "for-in iterators or C functions such as table.sort)");
   L->base = L->top - nresults;  /* protect stack slots below */
   L->status = LUA_YIELD;
   lua_unlock(L);
@@ -491,6 +518,7 @@ int luaD_pcall (lua_State *L, Pfunc func, void *u,
 struct SParser {  /* data to `f_parser' */
   ZIO *z;
   Mbuffer buff;  /* buffer to be used by the scanner */
+  Dyndata dyd;  /* labels and gotos, freed here even after a syntax error */
   const char *name;
 };
 
@@ -501,8 +529,10 @@ static void f_parser (lua_State *L, void *ud) {
   struct SParser *p = cast(struct SParser *, ud);
   int c = luaZ_lookahead(p->z);
   luaC_checkGC(L);
-  tf = ((c == LUA_SIGNATURE[0]) ? luaU_undump : luaY_parser)(L, p->z,
-                                                             &p->buff, p->name);
+  if (c == LUA_SIGNATURE[0])
+    tf = luaU_undump(L, p->z, &p->buff, p->name);
+  else
+    tf = luaY_parser(L, p->z, &p->buff, &p->dyd, p->name);
   cl = luaF_newLclosure(L, tf->nups, hvalue(gt(L)));
   cl->l.p = tf;
   for (i = 0; i < tf->nups; i++)  /* initialize eventual upvalues */
@@ -517,8 +547,12 @@ int luaD_protectedparser (lua_State *L, ZIO *z, const char *name) {
   int status;
   p.z = z; p.name = name;
   luaZ_initbuffer(L, &p.buff);
+  p.dyd.gt.arr = NULL; p.dyd.gt.n = p.dyd.gt.size = 0;
+  p.dyd.label.arr = NULL; p.dyd.label.n = p.dyd.label.size = 0;
   status = luaD_pcall(L, f_parser, &p, savestack(L, L->top), L->errfunc);
   luaZ_freebuffer(L, &p.buff);
+  luaM_freearray(L, p.dyd.gt.arr, p.dyd.gt.size, Labeldesc);
+  luaM_freearray(L, p.dyd.label.arr, p.dyd.label.size, Labeldesc);
   return status;
 }
 

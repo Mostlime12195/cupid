@@ -119,7 +119,7 @@ export class ConsolePanel {
   }
 
   info(text, kind = 'info') {
-    this.append(h('div', { class: `line meta ${kind}`, dataset: { level: 'meta' } }, text));
+    this.append(h('div', { class: `line meta ${kind}`, dataset: { level: 'meta' } }, this.linkify(text)));
   }
 
   separator(text) {

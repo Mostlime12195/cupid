@@ -5,6 +5,7 @@
 */
 
 
+#include <limits.h>
 #include <stddef.h>
 
 #define ltablib_c
@@ -266,12 +267,46 @@ static int sort (lua_State *L) {
 /* }====================================================== */
 
 
+/* table.move(a1, f, e, t [, a2]) (LuaJIT 2.1 / Lua 5.3) */
+static int tmove (lua_State *L) {
+  int f = luaL_checkint(L, 2);
+  int e = luaL_checkint(L, 3);
+  int t = luaL_checkint(L, 4);
+  int tt = !lua_isnoneornil(L, 5) ? 5 : 1;  /* destination table */
+  luaL_checktype(L, 1, LUA_TTABLE);
+  luaL_checktype(L, tt, LUA_TTABLE);
+  if (e >= f) {
+    int n, i;
+    luaL_argcheck(L, f > 0 || e < INT_MAX + f, 3, "too many elements to move");
+    n = e - f + 1;
+    luaL_argcheck(L, t <= INT_MAX - n + 1, 4, "destination wrap around");
+    if (t > e || t <= f || (tt != 1 && !lua_rawequal(L, 1, tt))) {
+      for (i = 0; i < n; i++) {
+        lua_pushinteger(L, f + i); lua_gettable(L, 1);
+        lua_pushinteger(L, t + i); lua_insert(L, -2);
+        lua_settable(L, tt);
+      }
+    }
+    else {  /* overlapping, moving up: copy backwards */
+      for (i = n - 1; i >= 0; i--) {
+        lua_pushinteger(L, f + i); lua_gettable(L, 1);
+        lua_pushinteger(L, t + i); lua_insert(L, -2);
+        lua_settable(L, tt);
+      }
+    }
+  }
+  lua_pushvalue(L, tt);
+  return 1;
+}
+
+
 static const luaL_Reg tab_funcs[] = {
   {"concat", tconcat},
   {"foreach", foreach},
   {"foreachi", foreachi},
   {"getn", getn},
   {"maxn", maxn},
+  {"move", tmove},
   {"insert", tinsert},
   {"remove", tremove},
   {"setn", setn},

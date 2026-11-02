@@ -22,6 +22,19 @@ require('love.timer')
 local ch = ...
 for i = 1, 5 do love.timer.sleep(0.3); ch:push(i) end
 ]]
+-- Long loop and a blocking demand inside pcall: the thread must still be
+-- preempted and must still yield to wait.
+local pcaller = [[
+local out, inbox = ...
+local ok, err = pcall(function()
+  local count = 0
+  while count < 2e7 do count = count + 1 end
+  out:push("pcall loop done")
+  out:push("pcall demand got " .. inbox:demand())
+  error("caught")
+end)
+out:push("pcall result: " .. tostring(ok) .. " " .. tostring(err):gsub("^.-: ", ""))
+]]
 
 local lines = {}
 local function log(s) lines[#lines + 1] = s; print(s) end
@@ -37,6 +50,8 @@ function love.load()
   sleepCh = love.thread.newChannel()
   s = love.thread.newThread(sleeper); s:start(sleepCh)
   e = love.thread.newThread("\nerror('boom from thread')"); e:start()
+  pcallOut, pcallIn = love.thread.newChannel(), love.thread.newChannel()
+  p = love.thread.newThread(pcaller); p:start(pcallOut, pcallIn)
   t0 = love.timer.getTime()
 end
 
@@ -48,6 +63,11 @@ function love.update(dt)
   if r then log(("big job done after %.2fs: %.1f"):format(love.timer.getTime() - t0, r)) end
   while true do local v = busyCh:pop(); if not v then break end busyCount = v end
   while true do local v = sleepCh:pop(); if not v then break end sleeps = v end
+  while true do
+    local v = pcallOut:pop(); if not v then break end
+    log(("%s (%.2fs, fps %d)"):format(v, love.timer.getTime() - t0, love.timer.getFPS()))
+    if v == "pcall loop done" then pcallIn:push(42) end
+  end
 end
 
 function love.keypressed(k)

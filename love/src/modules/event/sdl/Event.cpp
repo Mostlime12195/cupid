@@ -143,6 +143,12 @@ void Event::pump(float waitTimeout)
 			waitTimeoutMS = -1; // Wait forever.
 		else if (waitTimeout > 0.0f)
 			waitTimeoutMS = (int)std::min<int64>(LOVE_INT32_MAX, 1000LL * waitTimeout);
+#ifdef LOVE_EMSCRIPTEN
+		// Waiting would spin on the browser's main thread, which also freezes
+		// the page around it (love.errorhandler pumps with a 0.1s timeout every
+		// frame). New input only arrives between frames anyway.
+		waitTimeoutMS = 0;
+#endif
 
 		// Wait for the first event, if requested. WaitEvent also calls PumpEvents.
 		SDL_Event e = {};
@@ -214,8 +220,14 @@ Message *Event::wait()
 
 	SDL_Event e;
 
+#ifdef LOVE_EMSCRIPTEN
+	// See pump(): the browser can't block until the next event arrives.
+	if (!SDL_PollEvent(&e))
+		return nullptr;
+#else
 	if (!SDL_WaitEvent(&e))
 		return nullptr;
+#endif
 
 	return convert(e);
 }

@@ -91,6 +91,10 @@ typedef struct global_State {
   UpVal uvhead;  /* head of double-linked list of all open upvalues */
   struct Table *mt[NUM_TAGS];  /* metatables for basic types */
   TString *tmname[TM_N];  /* array with tag-method names */
+  /* yieldable pcall/xpcall (lbaselib.c): inside a coroutine, calls to the C
+     functions run these Lua versions instead (see luaD_precall) */
+  lua_CFunction pcallc, xpcallc;
+  union Closure *pcalll, *xpcalll;
 } global_State;
 
 
@@ -124,6 +128,10 @@ struct lua_State {
   GCObject *gclist;
   struct lua_longjmp *errorJmp;  /* current error recover point */
   ptrdiff_t errfunc;  /* current error handling function (stack index) */
+  /* For the coroutine that runs a pcall/xpcall body inside another coroutine
+     (so the body can yield, as in LuaJIT): the coroutine that called pcall.
+     It forwards yields, and coroutine.running reports it instead. */
+  struct lua_State *pcallparent;
 };
 
 

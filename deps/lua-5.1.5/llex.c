@@ -36,10 +36,10 @@
 /* ORDER RESERVED */
 const char *const luaX_tokens [] = {
     "and", "break", "do", "else", "elseif",
-    "end", "false", "for", "function", "if",
+    "end", "false", "for", "function", "goto", "if",
     "in", "local", "nil", "not", "or", "repeat",
     "return", "then", "true", "until", "while",
-    "..", "...", "==", ">=", "<=", "~=",
+    "..", "...", "==", ">=", "<=", "~=", "::",
     "<number>", "<name>", "<string>", "<eof>",
     NULL
 };
@@ -184,7 +184,13 @@ static void trydecpoint (LexState *ls, SemInfo *seminfo) {
   buffreplace(ls, old, ls->decpoint);  /* try updated decimal separator */
   if (!luaO_str2d(luaZ_buffer(ls->buff), &seminfo->r)) {
     /* format error with correct decimal point: no more options */
+    const char *b = luaZ_buffer(ls->buff);
+    size_t n = strlen(b);
     buffreplace(ls, ls->decpoint, '.');  /* undo change (for error message) */
+    if ((n > 2 && (b[n-1] == 'L' || b[n-1] == 'l') && (b[n-2] == 'L' || b[n-2] == 'l')) ||
+        (n > 1 && (b[n-1] == 'i' || b[n-1] == 'I') && !strchr(b, 'x') && !strchr(b, 'X')))
+      luaX_lexerror(ls, "malformed number (64-bit and imaginary literals need LuaJIT's "
+                        "FFI, which isn't available on the web)", TK_NUMBER);
     luaX_lexerror(ls, "malformed number", TK_NUMBER);
   }
 }
@@ -275,6 +281,51 @@ static void read_long_string (LexState *ls, SemInfo *seminfo, int sep) {
 }
 
 
+static int hexvalue (LexState *ls) {
+  int c = ls->current;
+  if (!isxdigit(c)) {
+    save(ls, c);
+    luaX_lexerror(ls, "hexadecimal digit expected", TK_STRING);
+  }
+  next(ls);
+  return isdigit(c) ? c - '0' : (tolower(c) - 'a') + 10;
+}
+
+
+/* \u{XXX}: saves the UTF-8 encoding of the code point (LuaJIT, Lua 5.3) */
+static void read_utf8esc (LexState *ls) {
+  unsigned long r;
+  char buff[8];
+  int n = 1;
+  next(ls);  /* skip 'u' */
+  if (ls->current != '{')
+    luaX_lexerror(ls, "missing '{' in \\u{xxxx}", TK_STRING);
+  next(ls);
+  r = hexvalue(ls);
+  while (isxdigit(ls->current)) {
+    if (r > (0x7FFFFFFFu >> 4))
+      luaX_lexerror(ls, "UTF-8 value too large", TK_STRING);
+    r = (r << 4) + hexvalue(ls);
+  }
+  if (ls->current != '}')
+    luaX_lexerror(ls, "missing '}' in \\u{xxxx}", TK_STRING);
+  next(ls);
+  if (r < 0x80)
+    buff[7] = (char)r;
+  else {
+    unsigned int mfb = 0x3f;  /* maximum that fits in the first byte */
+    do {
+      buff[8 - (n++)] = (char)(0x80 | (r & 0x3f));
+      r >>= 6;
+      mfb >>= 1;
+    } while (r > mfb);
+    buff[8 - n] = (char)((~mfb << 1) | r);
+  }
+  for (; n > 0; n--)
+    save(ls, buff[8 - n]);
+}
+
+
 static void read_string (LexState *ls, int del, SemInfo *seminfo) {
   save_and_next(ls);
   while (ls->current != del) {
@@ -297,6 +348,22 @@ static void read_string (LexState *ls, int del, SemInfo *seminfo) {
           case 'r': c = '\r'; break;
           case 't': c = '\t'; break;
           case 'v': c = '\v'; break;
+          case 'x': {  /* \xXX (LuaJIT, Lua 5.2) */
+            next(ls);
+            c = hexvalue(ls) << 4;
+            c += hexvalue(ls);
+            save(ls, c);
+            continue;
+          }
+          case 'z': {  /* \z skips the following whitespace (LuaJIT, Lua 5.2) */
+            next(ls);
+            while (isspace(ls->current)) {
+              if (currIsNewline(ls)) inclinenumber(ls);
+              else next(ls);
+            }
+            continue;
+          }
+          case 'u': read_utf8esc(ls); continue;
           case '\n':  /* go through */
           case '\r': save(ls, '\n'); inclinenumber(ls); continue;
           case EOZ: continue;  /* will raise an error next loop */
@@ -387,6 +454,11 @@ static int llex (LexState *ls, SemInfo *seminfo) {
         next(ls);
         if (ls->current != '=') return '~';
         else { next(ls); return TK_NE; }
+      }
+      case ':': {
+        next(ls);
+        if (ls->current != ':') return ':';
+        else { next(ls); return TK_DBCOLON; }
       }
       case '"':
       case '\'': {

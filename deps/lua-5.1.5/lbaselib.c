@@ -19,6 +19,10 @@
 #include "lauxlib.h"
 #include "lualib.h"
 
+#include "ldo.h"
+#include "lobject.h"
+#include "lstate.h"
+
 
 
 
@@ -282,9 +286,20 @@ static int luaB_loadstring (lua_State *L) {
 }
 
 
+/* sets the environment of a just-loaded chunk (LuaJIT's `env' argument) */
+static int load_env (lua_State *L, int status, int env) {
+  if (status == 0 && lua_istable(L, env)) {
+    lua_pushvalue(L, env);
+    lua_setfenv(L, -2);
+  }
+  return load_aux(L, status);
+}
+
+
 static int luaB_loadfile (lua_State *L) {
   const char *fname = luaL_optstring(L, 1, NULL);
-  return load_aux(L, luaL_loadfile(L, fname));
+  luaL_optstring(L, 2, "bt");  /* mode */
+  return load_env(L, luaL_loadfile(L, fname), 3);
 }
 
 
@@ -304,21 +319,38 @@ static const char *generic_reader (lua_State *L, void *ud, size_t *size) {
     return NULL;
   }
   else if (lua_isstring(L, -1)) {
-    lua_replace(L, 3);  /* save string in a reserved stack slot */
-    return lua_tolstring(L, 3, size);
+    lua_replace(L, 5);  /* save string in a reserved stack slot */
+    return lua_tolstring(L, 5, size);
   }
   else luaL_error(L, "reader function must return a string");
   return NULL;  /* to avoid warnings */
 }
 
 
+/* load(chunk [, chunkname [, mode [, env]]]); chunk is a string or a reader */
 static int luaB_load (lua_State *L) {
   int status;
-  const char *cname = luaL_optstring(L, 2, "=(load)");
-  luaL_checktype(L, 1, LUA_TFUNCTION);
-  lua_settop(L, 3);  /* function, eventual name, plus one reserved slot */
-  status = lua_load(L, generic_reader, NULL, cname);
-  return load_aux(L, status);
+  size_t l;
+  const char *s = (lua_type(L, 1) == LUA_TSTRING) ? lua_tolstring(L, 1, &l) : NULL;
+  const char *mode = luaL_optstring(L, 3, "bt");
+  if (s != NULL) {
+    const char *cname = luaL_optstring(L, 2, s);
+    int binary = (l > 0 && s[0] == LUA_SIGNATURE[0]);
+    if (binary ? !strchr(mode, 'b') : !strchr(mode, 't')) {
+      lua_pushnil(L);
+      lua_pushfstring(L, "attempt to load a %s chunk (mode is '%s')",
+                      binary ? "binary" : "text", mode);
+      return 2;
+    }
+    status = luaL_loadbuffer(L, s, l, cname);
+  }
+  else {
+    const char *cname = luaL_optstring(L, 2, "=(load)");
+    luaL_checktype(L, 1, LUA_TFUNCTION);
+    lua_settop(L, 5);  /* function, name, mode, env, plus one reserved slot */
+    status = lua_load(L, generic_reader, NULL, cname);
+  }
+  return load_env(L, status, 4);
 }
 
 
@@ -371,7 +403,7 @@ static int luaB_select (lua_State *L) {
 }
 
 
-static int luaB_pcall (lua_State *L) {
+static int luaB_rawpcall (lua_State *L) {
   int status;
   luaL_checkany(L, 1);
   status = lua_pcall(L, lua_gettop(L) - 1, LUA_MULTRET, 0);
@@ -381,16 +413,105 @@ static int luaB_pcall (lua_State *L) {
 }
 
 
-static int luaB_xpcall (lua_State *L) {
+static int luaB_rawxpcall (lua_State *L) {
   int status;
+  int n = lua_gettop(L);
   luaL_checkany(L, 2);
-  lua_settop(L, 2);
-  lua_insert(L, 1);  /* put error function under function to be called */
-  status = lua_pcall(L, 0, LUA_MULTRET, 1);
+  lua_pushvalue(L, 1);  /* f */
+  lua_pushvalue(L, 2);  /* error handler */
+  lua_replace(L, 1);  /* handler goes under f and its arguments */
+  lua_replace(L, 2);
+  status = lua_pcall(L, n - 2, LUA_MULTRET, 1);
   lua_pushboolean(L, (status == 0));
   lua_replace(L, 1);
   return lua_gettop(L);  /* return status + all results */
 }
+
+
+/*
+** {======================================================
+** Yieldable pcall/xpcall (as in LuaJIT)
+** Inside a coroutine, pcall runs its function in a child coroutine, so the
+** function can yield: the yield passes through pcall to whoever resumed the
+** parent. Errors end the child, which is what makes the call protected.
+** =======================================================
+*/
+
+static int luaB_coisyieldable (lua_State *L) {
+  lua_pushboolean(L, luaD_chainyieldable(L, 1));
+  return 1;
+}
+
+
+/* mkco(trampoline, f [, handler]) -> child coroutine, whether f must be
+   passed to the trampoline; or nothing if f can't be called */
+static int luaB_mkpcallco (lua_State *L) {
+  int direct = lua_isfunction(L, 2) && !lua_iscfunction(L, 2);
+  lua_State *NL;
+  if (!lua_isfunction(L, 2)) {
+    if (!luaL_getmetafield(L, 2, "__call"))
+      return 0;  /* let the plain pcall report the error */
+    lua_pop(L, 1);
+  }
+  NL = lua_newthread(L);  /* inherits L's hooks */
+  if (lua_gettop(L) >= 4) {  /* xpcall: handler runs at the error, like errfunc */
+    lua_pushvalue(L, 3);
+    lua_xmove(L, NL, 1);
+    NL->errfunc = savestack(NL, NL->top - 1);
+  }
+  /* a Lua function is the body itself, so error levels match a real pcall */
+  lua_pushvalue(L, direct ? 2 : 1);
+  lua_xmove(L, NL, 1);
+  NL->pcallparent = L;
+  lua_pushboolean(L, !direct);
+  return 2;
+}
+
+
+static const char pcall_source[] =
+  "local mkco, resume, status, yield = ...\n"
+  "local function trampoline(f, ...) return f(...) end\n"
+  "local function finish(co, ok, ...)\n"
+  "  if not ok then return false, ... end\n"
+  "  if status(co) == 'dead' then return true, ... end\n"
+  "  return finish(co, resume(co, yield(...)))\n"
+  "end\n"
+  "local function pcall(f, ...)\n"
+  "  local co, viatrampoline = mkco(trampoline, f)\n"
+  "  if not co then return false, 'attempt to call a ' .. type(f) .. ' value' end\n"
+  "  if viatrampoline then return finish(co, resume(co, f, ...)) end\n"
+  "  return finish(co, resume(co, ...))\n"
+  "end\n"
+  "local function xpcall(f, handler, ...)\n"
+  "  local co, viatrampoline = mkco(trampoline, f, handler)\n"
+  "  if not co then return false, handler('attempt to call a ' .. type(f) .. ' value') end\n"
+  "  if viatrampoline then return finish(co, resume(co, f, ...)) end\n"
+  "  return finish(co, resume(co, ...))\n"
+  "end\n"
+  "return pcall, xpcall\n";
+
+static int luaB_coresume (lua_State *L);
+static int luaB_costatus (lua_State *L);
+static int luaB_yield (lua_State *L);
+
+static void open_pcall (lua_State *L) {
+  if (luaL_loadbuffer(L, pcall_source, sizeof(pcall_source) - 1, "=[C]") != 0)
+    lua_error(L);
+  lua_pushcfunction(L, luaB_mkpcallco);
+  lua_pushcfunction(L, luaB_coresume);
+  lua_pushcfunction(L, luaB_costatus);
+  lua_pushcfunction(L, luaB_yield);
+  lua_call(L, 4, 2);
+  /* the globals stay the C functions; luaD_precall switches to these */
+  G(L)->pcallc = luaB_rawpcall;
+  G(L)->xpcallc = luaB_rawxpcall;
+  G(L)->pcalll = (Closure *)lua_topointer(L, -2);
+  G(L)->xpcalll = (Closure *)lua_topointer(L, -1);
+  lua_setfield(L, LUA_REGISTRYINDEX, "LUAWEB_XPCALL");  /* keep them alive */
+  lua_setfield(L, LUA_REGISTRYINDEX, "LUAWEB_PCALL");
+}
+
+/* }====================================================== */
 
 
 static int luaB_tostring (lua_State *L) {
@@ -456,7 +577,7 @@ static const luaL_Reg base_funcs[] = {
   {"load", luaB_load},
   {"loadstring", luaB_loadstring},
   {"next", luaB_next},
-  {"pcall", luaB_pcall},
+  {"pcall", luaB_rawpcall},
   {"print", luaB_print},
   {"rawequal", luaB_rawequal},
   {"rawget", luaB_rawget},
@@ -468,7 +589,7 @@ static const luaL_Reg base_funcs[] = {
   {"tostring", luaB_tostring},
   {"type", luaB_type},
   {"unpack", luaB_unpack},
-  {"xpcall", luaB_xpcall},
+  {"xpcall", luaB_rawxpcall},
   {NULL, NULL}
 };
 
@@ -488,7 +609,9 @@ static const char *const statnames[] =
     {"running", "suspended", "normal", "dead"};
 
 static int costatus (lua_State *L, lua_State *co) {
-  if (L == co) return CO_RUN;
+  lua_State *T;
+  for (T = L; T != NULL; T = T->pcallparent)  /* pcall children run on its behalf */
+    if (T == co) return CO_RUN;
   switch (lua_status(co)) {
     case LUA_YIELD:
       return CO_SUS;
@@ -596,7 +719,14 @@ static int luaB_yield (lua_State *L) {
 
 
 static int luaB_corunning (lua_State *L) {
-  if (lua_pushthread(L))
+  lua_State *T = L;
+  while (T->pcallparent != NULL)  /* report the coroutine that called pcall */
+    T = T->pcallparent;
+  if (T != L) {
+    setthvalue(L, L->top, T);
+    incr_top(L);
+  }
+  else if (lua_pushthread(L))
     lua_pushnil(L);  /* main thread is not a coroutine */
   return 1;
 }
@@ -604,6 +734,7 @@ static int luaB_corunning (lua_State *L) {
 
 static const luaL_Reg co_funcs[] = {
   {"create", luaB_cocreate},
+  {"isyieldable", luaB_coisyieldable},
   {"resume", luaB_coresume},
   {"running", luaB_corunning},
   {"status", luaB_costatus},
@@ -648,6 +779,7 @@ static void base_open (lua_State *L) {
 LUALIB_API int luaopen_base (lua_State *L) {
   base_open(L);
   luaL_register(L, LUA_COLIBNAME, co_funcs);
+  open_pcall(L);
   return 2;
 }
 
