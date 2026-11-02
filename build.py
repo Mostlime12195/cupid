@@ -138,7 +138,9 @@ def needs_rebuild(src: Path, obj: Path) -> bool:
     dep = obj.with_suffix(".d")
     if not dep.exists():
         return True
-    deps = dep.read_text().replace("\\\n", " ").split(":", 1)[-1].split()
+    # Make-style dependency list; spaces in paths are escaped as "\ ".
+    text = dep.read_text().replace("\\\n", " ")
+    deps = re.split(r"(?<!\\)\s+", re.split(r":\s", text, maxsplit=1)[-1].strip())
     for d in deps:
         d = d.replace("\\ ", " ")
         try:
