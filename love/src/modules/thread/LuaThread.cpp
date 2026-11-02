@@ -47,11 +47,8 @@ LuaThread::~LuaThread()
 {
 }
 
-void LuaThread::threadFunction()
+lua_State *LuaThread::newState()
 {
-	error.clear();
-	haserror = false;
-
 	lua_State *L = luaL_newstate();
 	luaL_openlibs(L);
 
@@ -80,6 +77,16 @@ void LuaThread::threadFunction()
 	// loaded before using any love function that can take a filepath argument.
 	luax_require(L, "love.filesystem");
 	lua_pop(L, 1);
+
+	return L;
+}
+
+void LuaThread::threadFunction()
+{
+	error.clear();
+	haserror = false;
+
+	lua_State *L = newState();
 
 	lua_pushcfunction(L, luax_traceback);
 	int tracebackidx = lua_gettop(L);
@@ -110,6 +117,51 @@ void LuaThread::threadFunction()
 	if (haserror)
 		onError();
 }
+
+#ifdef LOVE_EMSCRIPTEN
+
+bool LuaThread::webPrepare(lua_State *&L, lua_State *&co, int &coref, int &nargs)
+{
+	error.clear();
+	haserror = false;
+
+	L = newState();
+
+	if (luaL_loadbuffer(L, (const char *) code->getData(), code->getSize(), name.c_str()) != 0)
+	{
+		std::string err = luax_tostring(L, -1);
+		webFinish(L, &err);
+		L = nullptr;
+		return false;
+	}
+
+	co = lua_newthread(L);
+	coref = luaL_ref(L, LUA_REGISTRYINDEX);
+	lua_xmove(L, co, 1);
+
+	nargs = (int) args.size();
+	for (int i = 0; i < nargs; i++)
+		luax_pushvariant(co, args[i]);
+	args.clear();
+
+	return true;
+}
+
+void LuaThread::webFinish(lua_State *L, const std::string *err)
+{
+	if (err != nullptr)
+	{
+		error = *err;
+		haserror = true;
+	}
+
+	lua_close(L);
+
+	if (haserror)
+		onError();
+}
+
+#endif // LOVE_EMSCRIPTEN
 
 bool LuaThread::start(const std::vector<Variant> &args)
 {

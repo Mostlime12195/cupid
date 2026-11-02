@@ -20,6 +20,10 @@
 
 #include "wrap_Channel.h"
 
+#ifdef LOVE_EMSCRIPTEN
+#include "web/GreenThreads.h"
+#endif
+
 namespace love
 {
 namespace thread
@@ -46,6 +50,15 @@ int w_Channel_push(lua_State *L)
 int w_Channel_supply(lua_State *L)
 {
 	Channel *c = luax_checkchannel(L, 1);
+#ifdef LOVE_EMSCRIPTEN
+	{
+		Variant var;
+		luax_catchexcept(L, [&]() { var = luax_checkvariant(L, 2); });
+		if (var.getType() == Variant::UNKNOWN)
+			return luaL_argerror(L, 2, "boolean, number, string, love type, or table expected");
+		return web::supply(L, c, var, lua_isnumber(L, 3) ? lua_tonumber(L, 3) : -1.0);
+	}
+#endif
 	bool result = false;
 	luax_catchexcept(L, [&]() {
 		Variant var = luax_checkvariant(L, 2);
@@ -68,13 +81,21 @@ int w_Channel_pop(lua_State *L)
 	if (c->pop(&var))
 		luax_pushvariant(L, var);
 	else
+	{
+#ifdef LOVE_EMSCRIPTEN
+		web::poll(L);
+#endif
 		lua_pushnil(L);
+	}
 	return 1;
 }
 
 int w_Channel_demand(lua_State *L)
 {
 	Channel *c = luax_checkchannel(L, 1);
+#ifdef LOVE_EMSCRIPTEN
+	return web::demand(L, c, lua_isnumber(L, 2) ? lua_tonumber(L, 2) : -1.0);
+#endif
 	Variant var;
 	bool result = false;
 

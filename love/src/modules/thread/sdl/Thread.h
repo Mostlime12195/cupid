@@ -45,6 +45,11 @@ public:
 	void wait();
 	bool isRunning();
 
+#ifdef LOVE_EMSCRIPTEN
+	// Called by the web scheduler when the thread's code has finished.
+	void webFinished();
+#endif
+
 private:
 
 	Threadable *t;

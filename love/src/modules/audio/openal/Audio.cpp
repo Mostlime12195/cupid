@@ -19,6 +19,10 @@
  **/
 
 #include "Audio.h"
+
+#ifdef LOVE_EMSCRIPTEN
+#include "thread/web/GreenThreads.h"
+#endif
 #include "common/delay.h"
 #include "RecordingDevice.h"
 #include "sound/Decoder.h"
@@ -201,7 +205,11 @@ Audio::Audio()
 	}
 
 	poolThread = new PoolThread(pool);
+#ifdef LOVE_EMSCRIPTEN
+	poolTask = thread::web::addFrameTask([this]() { pool->update(); });
+#else
 	poolThread->start();
+#endif
 	
 #ifdef LOVE_IOS
 	love::ios::initAudioSessionInterruptionHandler();
@@ -222,6 +230,9 @@ Audio::~Audio()
 {
 #ifdef LOVE_IOS
 	love::ios::destroyAudioSessionInterruptionHandler();
+#endif
+#ifdef LOVE_EMSCRIPTEN
+	thread::web::removeFrameTask(poolTask);
 #endif
 	poolThread->setFinish();
 	poolThread->wait();

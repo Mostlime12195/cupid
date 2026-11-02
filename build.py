@@ -111,6 +111,7 @@ def cmake_sources():
 # Individual files needed from targets that are otherwise left out.
 EXTRA_SOURCES = [
     "src/modules/video/VideoStream.cpp",  # graphics references the base type
+    "src/modules/thread/web/GreenThreads.cpp",
 ]
 
 
@@ -228,7 +229,7 @@ def main():
 
 def copy_web():
     """Copy the player, editor and examples next to the engine."""
-    for sub in ("player", "editor"):
+    for sub in ("player", "editor", "dev"):
         src = WEB / sub
         if src.exists():
             shutil.copytree(src, DIST, dirs_exist_ok=True)

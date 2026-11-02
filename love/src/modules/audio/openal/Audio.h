@@ -186,6 +186,9 @@ private:
 	};
 
 	PoolThread *poolThread;
+#ifdef LOVE_EMSCRIPTEN
+	int poolTask = 0;
+#endif
 
 	DistanceModel distanceModel;
 	//float metersPerUnit = 1.0;

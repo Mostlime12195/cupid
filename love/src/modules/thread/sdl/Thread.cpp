@@ -20,6 +20,11 @@
 
 #include "Thread.h"
 
+#ifdef LOVE_EMSCRIPTEN
+#include "thread/LuaThread.h"
+#include "thread/web/GreenThreads.h"
+#endif
+
 namespace love
 {
 namespace thread
@@ -39,6 +44,49 @@ Thread::~Thread()
 	if (thread)
 		SDL_DetachThread(thread);
 }
+
+#ifdef LOVE_EMSCRIPTEN
+
+// No OS threads in the browser. Lua threads run on the web scheduler; engine
+// threads (e.g. the audio pool) are driven from the frame loop instead.
+bool Thread::start()
+{
+	if (running)
+		return false;
+
+	LuaThread *lt = dynamic_cast<LuaThread *>(t);
+	if (lt == nullptr)
+		return false;
+
+	running = true;
+	t->retain();
+	web::spawn(lt, this);
+	return true;
+}
+
+void Thread::wait()
+{
+	LuaThread *lt = dynamic_cast<LuaThread *>(t);
+	if (running && lt != nullptr)
+		web::waitFor(lt);
+}
+
+bool Thread::isRunning()
+{
+	return running;
+}
+
+void Thread::webFinished()
+{
+	running = false;
+}
+
+int Thread::thread_runner(void *)
+{
+	return 0;
+}
+
+#else
 
 bool Thread::start()
 {
@@ -103,6 +151,8 @@ int Thread::thread_runner(void *data)
 	self->t->release();
 	return 0;
 }
+#endif // LOVE_EMSCRIPTEN
+
 } // sdl
 } // thread
 } // love

@@ -28,6 +28,7 @@
 // LOVE
 #include "common/Data.h"
 #include "common/Object.h"
+#include "common/runtime.h"
 #include "common/Variant.h"
 #include "threads.h"
 
@@ -50,7 +51,17 @@ public:
 
 	bool start(const std::vector<Variant> &args);
 
+#ifdef LOVE_EMSCRIPTEN
+	// Cooperative execution on the web (see thread/web/GreenThreads.cpp).
+	// Creates the thread's Lua state and a coroutine with the thread's main
+	// function and arguments pushed. Returns false if the code can't load.
+	bool webPrepare(lua_State *&L, lua_State *&co, int &coref, int &nargs);
+	void webFinish(lua_State *L, const std::string *err);
+#endif
+
 private:
+
+	lua_State *newState();
 
 	void onError();
 

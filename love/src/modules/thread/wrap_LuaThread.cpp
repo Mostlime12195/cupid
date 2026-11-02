@@ -20,6 +20,10 @@
 
 #include "wrap_LuaThread.h"
 
+#ifdef LOVE_EMSCRIPTEN
+#include "web/GreenThreads.h"
+#endif
+
 namespace love
 {
 namespace thread
@@ -56,6 +60,9 @@ int w_Thread_start(lua_State *L)
 int w_Thread_wait(lua_State *L)
 {
 	LuaThread *t = luax_checkthread(L, 1);
+#ifdef LOVE_EMSCRIPTEN
+	return web::join(L, t);
+#endif
 	t->wait();
 	return 0;
 }
@@ -73,6 +80,10 @@ int w_Thread_getError(lua_State *L)
 int w_Thread_isRunning(lua_State *L)
 {
 	LuaThread *t = luax_checkthread(L, 1);
+#ifdef LOVE_EMSCRIPTEN
+	if (t->isRunning())
+		web::poll(L);
+#endif
 	luax_pushboolean(L, t->isRunning());
 	return 1;
 }

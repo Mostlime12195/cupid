@@ -237,7 +237,8 @@ async function onQuit(code) {
 // Getting the game
 
 async function fetchWithProgress(url) {
-  const res = await fetch(url);
+  // Revalidate so an updated game is never served stale from the HTTP cache.
+  const res = await fetch(url, { cache: 'no-cache' });
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
   const total = Number(res.headers.get('content-length')) || 0;
   if (!res.body || !total) return new Uint8Array(await res.arrayBuffer());
