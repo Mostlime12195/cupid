@@ -257,14 +257,19 @@ async function start(game) {
   canvas.focus();
   post({ type: 'started' });
 
-  // Mirror the window title set by love.window.setTitle.
+  // SDL writes the LÖVE window title to document.title. Report it to the
+  // embedding page, but keep a packaged game's page title over LÖVE's
+  // default "Untitled".
+  const pageTitle = document.title;
   let lastTitle = '';
-  setInterval(() => {
+  const onTitle = () => {
+    if (document.title === 'Untitled' && pageTitle !== 'LÖVE Player') document.title = pageTitle;
     if (document.title !== lastTitle) {
       lastTitle = document.title;
       post({ type: 'title', title: lastTitle });
     }
-  }, 500);
+  };
+  new MutationObserver(onTitle).observe(document.head, { subtree: true, childList: true, characterData: true });
 
   try {
     M.callMain([arg]);
