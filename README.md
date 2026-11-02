@@ -312,7 +312,7 @@ Player URL options:
 - Networking modules: `socket` (LuaSocket) and `enet` (browsers have no raw
   sockets). `https` works, see above.
 - WOFF2 fonts (FreeType is built without Brotli); TTF and OTF work.
-- LuaJIT-only features: the JIT itself and `ffi` (`bit` is provided).
+- LuaJIT itself and its `ffi` library (Lua runs on PUC Lua 5.1 with this project's own JIT; `bit` is provided).
 - Compute shaders (WebGL 2 has none).
 
 ## How it works
