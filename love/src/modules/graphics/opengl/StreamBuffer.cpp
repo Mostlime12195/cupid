@@ -190,6 +190,91 @@ protected:
 
 }; // StreamBufferSubDataOrphan
 
+#ifdef LOVE_EMSCRIPTEN
+
+// WebGL (Smitten). WebGL can't draw from client memory: Emscripten emulates
+// it by copying each draw's vertices and indices into a small ring of
+// temporary buffers, and writing into a buffer the GPU hasn't finished with
+// makes the browser copy or wait (about 0.25 ms a draw, so a few thousand
+// draws that can't be batched took most of a second). Writing a shared
+// buffer with bufferSubData is just as slow for the same reason. Instead,
+// every flush gives the buffer new storage of exactly the size it needs with
+// bufferData, which browsers handle without waiting on earlier draws.
+class StreamBufferWebGL final : public love::graphics::StreamBuffer, public Volatile
+{
+public:
+
+	StreamBufferWebGL(BufferUsage mode, size_t size)
+		: love::graphics::StreamBuffer(mode, size)
+		, vbo(0)
+		, glMode(OpenGL::getGLBufferType(mode))
+		, data(nullptr)
+	{
+		try
+		{
+			data = new uint8[size];
+		}
+		catch (std::exception &)
+		{
+			throw love::Exception("Out of memory.");
+		}
+
+		loadVolatile();
+	}
+
+	virtual ~StreamBufferWebGL()
+	{
+		unloadVolatile();
+		delete[] data;
+	}
+
+	size_t getGPUReadOffset() const override { return 0; }
+
+	MapInfo map(size_t /*minsize*/) override
+	{
+		return MapInfo(data, bufferSize);
+	}
+
+	size_t unmap(size_t usedsize) override
+	{
+		gl.bindBuffer(mode, vbo);
+		glBufferData(glMode, usedsize, data, GL_STREAM_DRAW);
+		return 0;
+	}
+
+	void markUsed(size_t /*usedsize*/) override { }
+	void nextFrame() override { }
+
+	ptrdiff_t getHandle() const override { return vbo; }
+
+	bool loadVolatile() override
+	{
+		if (vbo != 0)
+			return true;
+
+		glGenBuffers(1, &vbo);
+		return true;
+	}
+
+	void unloadVolatile() override
+	{
+		if (vbo == 0)
+			return;
+
+		gl.deleteBuffer(vbo);
+		vbo = 0;
+	}
+
+private:
+
+	GLuint vbo;
+	GLenum glMode;
+	uint8 *data;
+
+}; // StreamBufferWebGL
+
+#endif // LOVE_EMSCRIPTEN
+
 class StreamBufferSync : public love::graphics::StreamBuffer
 {
 public:
@@ -546,6 +631,10 @@ love::graphics::StreamBuffer *CreateStreamBuffer(BufferUsage mode, size_t size)
 
 		return new StreamBufferSubDataOrphan(mode, size);
 	}
+#ifdef LOVE_EMSCRIPTEN
+	else if (GLAD_ES_VERSION_3_0)
+		return new StreamBufferWebGL(mode, size);
+#endif
 	else
 		return new StreamBufferClientMemory(mode, size);
 }
