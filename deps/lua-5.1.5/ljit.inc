@@ -319,6 +319,31 @@ EMSCRIPTEN_KEEPALIVE int ljit_h_call (lua_State *L, const Instruction *pc) {
   int b = GETARG_B(i);
   int nresults = GETARG_C(i) - 1;
   if (b != 0) L->top = ra+b;
+  if (ttisfunction(ra) && !clvalue(ra)->c.isC) {
+    /* luaD_precall's Lua case, for the common calls that don't need to
+    ** grow the stack or CallInfo array, adjust varargs or call a hook. */
+    Proto *np = clvalue(ra)->l.p;
+    CallInfo *nci;
+    StkId nbase = ra + 1, st;
+    if (!np->is_vararg && !(L->hookmask & LUA_MASKCALL) &&
+        L->ci != L->end_ci &&
+        (char *)L->stack_last - (char *)L->top > np->maxstacksize * (int)sizeof(TValue)) {
+      L->ci->savedpc = L->savedpc;
+      if (L->top > nbase + np->numparams)
+        L->top = nbase + np->numparams;
+      nci = ++L->ci;
+      nci->func = ra;
+      L->base = nci->base = nbase;
+      nci->top = nbase + np->maxstacksize;
+      L->savedpc = np->code;
+      nci->tailcalls = 0;
+      nci->nresults = nresults;
+      for (st = L->top; st < nci->top; st++)
+        setnilvalue(st);
+      L->top = nci->top;
+      return ljit_enter(L);
+    }
+  }
   switch (luaD_precall(L, ra, nresults)) {
     case PCRLUA: return ljit_enter(L);
     case PCRC: {
@@ -360,6 +385,20 @@ EMSCRIPTEN_KEEPALIVE int ljit_h_return (lua_State *L, const Instruction *pc) {
   if (b != 0) L->top = ra+b-1;
   /* (luaF_close would do nothing unless an upvalue is open in this frame) */
   if (L->openupval && ngcotouv(L->openupval)->v >= base) luaF_close(L, base);
+  if (!(L->hookmask & LUA_MASKRET)) {
+    /* luaD_poscall without the hook */
+    CallInfo *ci = L->ci--;
+    StkId res = ci->func, first = ra;
+    int wanted = ci->nresults, n;
+    L->base = (ci - 1)->base;
+    L->savedpc = (ci - 1)->savedpc;
+    for (n = wanted; n != 0 && first < L->top; n--)
+      setobjs2s(L, res++, first++);
+    while (n-- > 0)
+      setnilvalue(res++);
+    L->top = res;
+    return wanted != LUA_MULTRET ? LJIT_RET1 : LJIT_RET0;
+  }
   b = luaD_poscall(L, ra);
   return b ? LJIT_RET1 : LJIT_RET0;
 }
@@ -523,6 +562,7 @@ typedef struct Compiler {
   int n;      /* number of instructions */
   int pcidx;  /* instruction being compiled */
   int depth;  /* blocks opened inside the current instruction */
+  TString *indexname;  /* "__index" */
 } Compiler;
 
 #define C (&cc->code)
@@ -908,26 +948,100 @@ static void lookup (Compiler *cc, int rk, int slow) {
   br_if_out(cc, slow);
 }
 
-/* ra = V_TAB[key]; `table` is a register, or -1 for the environment. */
+/* Levels of __index tables followed inline (an object, its class and the
+** class's base class). */
+#define LJIT_INDEX_LEVELS 3
+
+/* ra = nil */
+static void set_nil (Compiler *cc, int a) {
+  lget(cc, V_BASE); i32c(cc, LUA_TNIL);
+  mem(cc, W_I32_STORE, 2, reg(a) + TV_TT);
+}
+
+/* ra = the TValue at V_S */
+static void copy_from_slot (Compiler *cc, int a) {
+  int half;
+  for (half = 0; half < 2; half++) {
+    lget(cc, V_BASE);
+    lget(cc, V_S);
+    mem(cc, W_I64_LOAD, 3, half * 8);
+    mem(cc, W_I64_STORE, 3, reg(a) + half * 8);
+  }
+}
+
+/* ra = V_TAB[key]; `table` is a register, or -1 for the environment.
+** Like luaV_gettable, a string key that is absent (or nil) is looked up in
+** the metatable's __index table, up to LJIT_INDEX_LEVELS tables, and is nil
+** without a metatable or __index; anything else (an __index function, a
+** deeper chain) goes to the helper. */
 static void get_table (Compiler *cc, int a, int table, int key, int self) {
+  int strkey = key_kind(cc, key) == KEY_STR;
+  int level;
   block(cc, W_BLOCK, W_VOID);  /* done */
   block(cc, W_BLOCK, W_VOID);  /* slow */
   if (table < 0) load_env(cc); else load_table_reg(cc, table, 0);
-  lookup(cc, key, 0);
-  lget(cc, V_S); mem(cc, W_I32_LOAD, 2, TV_TT);
-  op(cc, W_I32_EQZ);
-  br_if_out(cc, 0);  /* nil: may need __index */
+  /* (the helper repeats this copy, so it can come first) */
   if (self) copy_tvalue(cc, a + 1, 0, reg(table));
-  {
-    int half;
-    for (half = 0; half < 2; half++) {
-      lget(cc, V_BASE);
-      lget(cc, V_S);
-      mem(cc, W_I64_LOAD, 3, half * 8);
-      mem(cc, W_I64_STORE, 3, reg(a) + half * 8);
-    }
+  if (!strkey) {
+    lookup(cc, key, 0);
+    /* an array slot: nil without a metatable means nil */
+    lget(cc, V_S); mem(cc, W_I32_LOAD, 2, TV_TT);
+    op(cc, W_I32_EQZ);
+    block(cc, W_IF, W_VOID);
+    lget(cc, V_TAB); mem(cc, W_I32_LOAD, 2, T_METATABLE);
+    br_if_out(cc, 1);  /* slow: may have __index */
+    set_nil(cc, a);
+    b_byte(C, W_BR); b_u32(C, 2);  /* done */
+    end(cc);
+    copy_from_slot(cc, a);
+    b_byte(C, W_BR); b_u32(C, 1);
+    end(cc);
+    call_helper(cc, H_EXEC);
+    reload_base(cc);
+    end(cc);
+    return;
   }
-  b_byte(C, W_BR); b_u32(C, 1);
+  for (level = 0; level < LJIT_INDEX_LEVELS; level++) {
+    /* V_TAB: the table to look in; depth: done is 2 blocks out of miss */
+    block(cc, W_BLOCK, W_VOID);  /* miss */
+    lookup_str(cc, rawtsvalue(&cc->p->k[INDEXK(key)]));
+    lget(cc, V_S); op(cc, W_I32_EQZ);
+    br_if_out(cc, 0);  /* absent */
+    lget(cc, V_S); mem(cc, W_I32_LOAD, 2, TV_TT);
+    op(cc, W_I32_EQZ);
+    br_if_out(cc, 0);  /* nil */
+    copy_from_slot(cc, a);
+    b_byte(C, W_BR); b_u32(C, 2);  /* done */
+    end(cc);
+    /* absent: V_TAB = metatable, or the result is nil */
+    lget(cc, V_TAB); mem(cc, W_I32_LOAD, 2, T_METATABLE);
+    ltee(cc, V_TAB);
+    op(cc, W_I32_EQZ);
+    block(cc, W_IF, W_VOID);
+    set_nil(cc, a);
+    b_byte(C, W_BR); b_u32(C, 2);  /* done */
+    end(cc);
+    /* V_S = metatable.__index (the metatable's flags only cache absence) */
+    lookup_str(cc, cc->indexname);
+    lget(cc, V_S); op(cc, W_I32_EQZ);
+    block(cc, W_IF, W_TYPE_I32);
+    i32c(cc, 1);
+    b_byte(C, W_ELSE);
+    lget(cc, V_S); mem(cc, W_I32_LOAD, 2, TV_TT);
+    op(cc, W_I32_EQZ);
+    end(cc);
+    block(cc, W_IF, W_VOID);
+    set_nil(cc, a);  /* no __index */
+    b_byte(C, W_BR); b_u32(C, 2);  /* done */
+    end(cc);
+    /* an __index table is looked in next; anything else is the helper's */
+    lget(cc, V_S); mem(cc, W_I32_LOAD, 2, TV_TT);
+    i32c(cc, LUA_TTABLE); op(cc, W_I32_NE);
+    br_if_out(cc, 0);  /* slow */
+    lget(cc, V_S); mem(cc, W_I32_LOAD, 2, TV_VALUE);
+    lset(cc, V_TAB);
+  }
+  b_byte(C, W_BR); b_u32(C, 0);  /* slow: a longer chain */
   end(cc);
   call_helper(cc, H_EXEC);
   reload_base(cc);
@@ -1312,7 +1426,6 @@ int ljit_compile (lua_State *L, Proto *p) {
   Buf m = { 0 }, s = { 0 };
   int index = 0;
   double t0 = emscripten_get_now();
-  (void)L;
   if (p->jit != 0) return p->jit > 0;
   p->jit = -1;  /* unless we succeed */
   if (p->sizecode > LJIT_MAX_CODE || p->sizecode == 0) {
@@ -1322,6 +1435,7 @@ int ljit_compile (lua_State *L, Proto *p) {
 
   memset(&cc, 0, sizeof(cc));
   cc.p = p;
+  cc.indexname = G(L)->tmname[TM_INDEX];
   cc.n = p->sizecode;
   if (!compile_body(&cc)) goto done;
 
