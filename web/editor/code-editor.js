@@ -5,6 +5,7 @@
 //   open(path, text)  show a file (creates its buffer the first time)
 //   has(path), getText(path), setText(path, text), close(path), rename(a, b)
 //   setError(path, line, message), clearErrors(), gotoLine(line, col)
+//   applySettings(settings), normalize(path, {trim, finalNewline})
 //   focus(), hide(), current, kind
 
 import { h } from './ui.js';
@@ -73,8 +74,13 @@ class CMEditor {
     this.states = new Map();
     this.current = null;
     this.completionSource = null;
+    this.prefs = {
+      tabSize: 2, insertSpaces: true, wordWrap: false, lineNumbers: true, highlightActiveLine: true,
+      closeBrackets: true, autocomplete: true, showWhitespace: false,
+    };
 
     const { state: S, view: V, language: L, highlight: H } = cm;
+    this.prefsCompartment = new S.Compartment();
     const t = H.tags;
 
     this.setErrorEffect = S.StateEffect.define();
@@ -123,8 +129,8 @@ class CMEditor {
     this.theme = V.EditorView.theme({
       '&': { height: '100%', backgroundColor: 'var(--editor-bg)', color: 'var(--fg)', fontSize: 'var(--editor-font-size, 13.5px)' },
       '.cm-scroller': { fontFamily: 'var(--font-mono)', lineHeight: '1.6' },
-      '.cm-content': { caretColor: 'var(--accent)', padding: '8px 0' },
-      '.cm-cursor, .cm-dropCursor': { borderLeftColor: 'var(--accent)', borderLeftWidth: '2px' },
+      '.cm-content': { caretColor: 'var(--fg)', padding: '8px 0' },
+      '.cm-cursor, .cm-dropCursor': { borderLeftColor: 'var(--fg)', borderLeftWidth: '2px' },
       '&.cm-focused .cm-selectionBackground, .cm-selectionBackground, .cm-content ::selection': { backgroundColor: 'var(--cm-selection) !important' },
       '.cm-gutters': { backgroundColor: 'var(--editor-bg)', color: 'var(--fg-subtle)', border: 'none', paddingRight: '4px' },
       '.cm-activeLineGutter': { backgroundColor: 'transparent', color: 'var(--fg)' },
@@ -138,15 +144,15 @@ class CMEditor {
       '.cm-tooltip': { backgroundColor: 'var(--panel-elev)', color: 'var(--fg)', border: '1px solid var(--border-strong)', borderRadius: '8px', boxShadow: 'var(--shadow)', overflow: 'hidden' },
       '.cm-tooltip-autocomplete > ul': { fontFamily: 'var(--font-mono)', fontSize: '12.5px', maxHeight: '18em' },
       '.cm-tooltip-autocomplete > ul > li': { padding: '3px 8px 3px 4px !important', lineHeight: '1.5' },
-      '.cm-tooltip-autocomplete > ul > li[aria-selected]': { backgroundColor: 'var(--accent-soft-strong)', color: 'var(--fg)' },
+      '.cm-tooltip-autocomplete > ul > li[aria-selected]': { backgroundColor: 'var(--active)', color: 'var(--fg)' },
       '.cm-completionDetail': { color: 'var(--fg-muted)', fontStyle: 'normal', marginLeft: '0.8em' },
-      '.cm-completionMatchedText': { textDecoration: 'none', color: 'var(--accent)', fontWeight: '600' },
+      '.cm-completionMatchedText': { textDecoration: 'none', color: 'var(--accent-text)', fontWeight: '600' },
       '.cm-completionInfo': { padding: '8px 10px', maxWidth: '320px', fontFamily: 'var(--font-ui)', fontSize: '12.5px', lineHeight: '1.45' },
       '.cm-panels': { backgroundColor: 'var(--panel-2)', color: 'var(--fg)', borderColor: 'var(--border)' },
       '.cm-panels.cm-panels-top': { borderBottom: '1px solid var(--border)' },
       '.cm-panel.cm-search': { padding: '6px 8px', fontFamily: 'var(--font-ui)', fontSize: '12.5px' },
       '.cm-panel.cm-search input, .cm-panel.cm-gotoLine input': { background: 'var(--input-bg)', color: 'var(--fg)', border: '1px solid var(--border-strong)', borderRadius: '5px', padding: '3px 6px', fontFamily: 'inherit', fontSize: '12.5px' },
-      '.cm-panel.cm-search button, .cm-panel.cm-gotoLine button': { background: 'var(--btn-bg)', backgroundImage: 'none', color: 'var(--fg)', border: '1px solid var(--border-strong)', borderRadius: '5px', padding: '3px 8px', fontFamily: 'inherit', fontSize: '12px', cursor: 'pointer' },
+      '.cm-panel.cm-search button, .cm-panel.cm-gotoLine button': { background: 'var(--panel-elev)', backgroundImage: 'none', color: 'var(--fg)', border: '1px solid var(--border-strong)', borderRadius: '5px', padding: '3px 8px', fontFamily: 'inherit', fontSize: '12px', cursor: 'pointer' },
       '.cm-panel.cm-search label': { fontSize: '12px', color: 'var(--fg-muted)' },
       '.cm-panel button[name=close]': { color: 'var(--fg-muted)', fontSize: '18px', right: '8px', top: '4px' },
       '.cm-error-line': { backgroundColor: 'var(--error-line-bg)', boxShadow: 'inset 3px 0 0 var(--danger)' },
@@ -167,10 +173,8 @@ class CMEditor {
   extensions(path) {
     const { state: S, view: V, language: L, commands: C, search: Se, autocomplete: A } = this.cm;
     const lang = languageOf(path);
-    const complete = (ctx) => (this.completionSource ? this.completionSource(ctx, path) : null);
     return [
-      V.lineNumbers(),
-      V.highlightActiveLineGutter(),
+      this.prefsCompartment.of(this.prefExtensions(path)),
       V.highlightSpecialChars(),
       C.history(),
       L.foldGutter({ openText: '▾', closedText: '▸' }),
@@ -180,15 +184,10 @@ class CMEditor {
       L.indentOnInput(),
       L.syntaxHighlighting(this.highlightStyle),
       L.bracketMatching(),
-      A.closeBrackets(),
-      A.autocompletion({ override: lang === 'lua' ? [complete] : [A.completeAnyWord], icons: true }),
       V.rectangularSelection(),
       V.crosshairCursor(),
-      V.highlightActiveLine(),
       Se.highlightSelectionMatches(),
       Se.search({ top: true }),
-      L.indentUnit.of('  '),
-      S.EditorState.tabSize.of(4),
       V.keymap.of([
         ...A.closeBracketsKeymap,
         ...C.defaultKeymap,
@@ -209,6 +208,65 @@ class CMEditor {
       }),
     ];
   }
+
+  /** The parts of the configuration that follow the user's settings. */
+  prefExtensions(path) {
+    const { state: S, view: V, language: L, autocomplete: A } = this.cm;
+    const p = this.prefs;
+    const lang = languageOf(path);
+    const complete = (ctx) => (this.completionSource ? this.completionSource(ctx, path) : null);
+    return [
+      p.lineNumbers ? [V.lineNumbers(), V.highlightActiveLineGutter()] : [],
+      p.highlightActiveLine ? V.highlightActiveLine() : [],
+      p.wordWrap ? V.EditorView.lineWrapping : [],
+      p.showWhitespace ? [V.highlightWhitespace(), V.highlightTrailingWhitespace()] : [],
+      p.closeBrackets ? A.closeBrackets() : [],
+      A.autocompletion({
+        override: lang === 'lua' ? [complete] : [A.completeAnyWord],
+        icons: true,
+        activateOnTyping: p.autocomplete,
+      }),
+      L.indentUnit.of(p.insertSpaces ? ' '.repeat(p.tabSize) : '\t'),
+      S.EditorState.tabSize.of(p.tabSize),
+    ];
+  }
+
+  applySettings(s) {
+    const keys = Object.keys(this.prefs);
+    if (keys.every((k) => this.prefs[k] === s[k])) return;
+    for (const k of keys) if (k in s) this.prefs[k] = s[k];
+    this.stash();
+    for (const [path, st] of this.states) {
+      const next = st.update({ effects: this.prefsCompartment.reconfigure(this.prefExtensions(path)) }).state;
+      this.states.set(path, next);
+      if (path === this.current) this.view.setState(next);
+    }
+  }
+
+  /** Trims trailing whitespace and/or adds a final newline, in place. */
+  normalize(path, { trim = false, finalNewline = false } = {}) {
+    const st = this.stateOf(path);
+    if (!st) return;
+    const doc = st.doc;
+    const changes = [];
+    if (trim) {
+      for (let i = 1; i <= doc.lines; i++) {
+        const line = doc.line(i);
+        const m = /[ \t]+$/.exec(line.text);
+        if (m) changes.push({ from: line.from + m.index, to: line.to });
+      }
+    }
+    if (finalNewline && doc.length > 0 && doc.sliceString(doc.length - 1) !== '\n') changes.push({ from: doc.length, insert: '\n' });
+    if (!changes.length) return;
+    const tr = { changes };
+    if (path === this.current) this.view.dispatch(tr);
+    else this.states.set(path, st.update(tr).state);
+  }
+
+  /** Refreshes layout after the font size (a CSS variable) changes. */
+  remeasure() { this.view.requestMeasure(); }
+
+  openGotoLine() { if (this.current) this.cm.search.gotoLine(this.view); }
 
   reportCursor(state) {
     const pos = state.selection.main.head;
@@ -421,6 +479,27 @@ class TextareaEditor {
   }
 
   focus() { this.ta.focus(); }
+
+  applySettings(s) {
+    this.ta.style.tabSize = String(s.tabSize);
+    this.ta.wrap = s.wordWrap ? 'soft' : 'off';
+    this.ta.style.whiteSpace = s.wordWrap ? 'pre-wrap' : 'pre';
+  }
+
+  normalize(path, { trim = false, finalNewline = false } = {}) {
+    let text = this.getText(path);
+    if (text == null) return;
+    if (trim) text = text.replace(/[ \t]+$/gm, '');
+    if (finalNewline && text && !text.endsWith('\n')) text += '\n';
+    if (text !== this.getText(path)) this.setText(path, text);
+  }
+
+  remeasure() {}
+
+  openGotoLine() {
+    const line = Number(prompt('Go to line'));
+    if (line > 0) this.gotoLine(line);
+  }
 
   openSearch() { /* the browser's own find works here */ }
 }

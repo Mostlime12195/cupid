@@ -30,6 +30,7 @@ export class ConsolePanel {
     this.filterText = '';
     this.level = 'all';
     this.inError = false; // swallowing log lines that belong to an error report
+    this.timestamps = false;
 
     controls.filter.addEventListener('input', () => {
       this.filterText = controls.filter.value.toLowerCase();
@@ -41,6 +42,7 @@ export class ConsolePanel {
     });
     controls.autoscroll.addEventListener('click', () => this.setAutoscroll(!this.autoscroll));
     controls.clear.addEventListener('click', () => this.clear());
+    controls.copy?.addEventListener('click', () => this.copyAll());
     root.addEventListener('scroll', () => {
       const atBottom = root.scrollHeight - root.scrollTop - root.clientHeight < 24;
       if (!atBottom && this.autoscroll && !this.programmaticScroll) this.setAutoscroll(false);
@@ -88,7 +90,30 @@ export class ConsolePanel {
     return frag;
   }
 
+  setTimestamps(on) {
+    this.timestamps = on;
+    for (const ts of this.root.querySelectorAll('.ts')) ts.hidden = !on;
+  }
+
+  setWrap(on) { this.root.classList.toggle('nowrap', !on); }
+
+  /** Copies the visible lines (respecting the filter) to the clipboard. */
+  async copyAll() {
+    const lines = [...this.root.children].filter((el) => !el.hidden && el.classList.contains('line')).map((el) => el.innerText);
+    if (!lines.length) return;
+    try {
+      await navigator.clipboard.writeText(lines.join('\n'));
+      this.opts.onCopied?.(lines.length);
+    } catch { /* clipboard blocked */ }
+  }
+
   append(el) {
+    if (!el.classList.contains('separator')) {
+      const d = new Date();
+      const ts = h('span', { class: 'ts', hidden: !this.timestamps },
+        `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}:${String(d.getSeconds()).padStart(2, '0')}`);
+      (el.querySelector('.error-title > span:last-child') || el).prepend(ts);
+    }
     if (!this.count) this.root.replaceChildren();
     this.count++;
     this.root.append(el);

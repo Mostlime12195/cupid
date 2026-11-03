@@ -32,7 +32,8 @@ export class Runner {
   }
 
   /** game: {files: {path: string|Uint8Array}} or {love: Uint8Array} */
-  run(game, { focus = true } = {}) {
+  /** query: extra player.html parameters, e.g. {scale: 'integer', jit: '0'} */
+  run(game, { focus = true, query = {} } = {}) {
     this.destroy();
     this.focusOnStart = focus;
     this.runId++;
@@ -40,7 +41,8 @@ export class Runner {
     frame.className = 'game-frame';
     frame.title = 'Game';
     frame.setAttribute('allow', 'autoplay; fullscreen; gamepad; clipboard-read; clipboard-write');
-    frame.src = PLAYER_URL;
+    const extra = new URLSearchParams(query).toString();
+    frame.src = extra ? `${PLAYER_URL}&${extra}` : PLAYER_URL;
     frame.addEventListener('load', () => this.hookKeys(frame));
     this.frame = frame;
     this.pending = game;

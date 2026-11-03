@@ -1,8 +1,11 @@
 // Smitten editor: application glue.
 
 import {
-  h, icon, hydrateIcons, openDialog, promptDialog, confirmDialog, showMenu, toast, downloadBlob, formatBytes, timeAgo, isMac,
+  h, icon, hydrateIcons, openDialog, promptDialog, confirmDialog, showMenu, toast, downloadBlob, formatBytes, timeAgo, isMac, modKey,
 } from './ui.js';
+import { settings, applyTheme } from './settings.js';
+import { openSettings } from './settings-dialog.js';
+import { openPicker } from './palette.js';
 import * as store from './fs-store.js';
 import { kindOf, mimeOf, classifyBytes, languageLabel, iconFor, baseName, dirName, byteSize } from './file-types.js';
 import { createEditor } from './code-editor.js';
@@ -34,7 +37,6 @@ const state = {
   saved: new Map(), // path -> text as last saved (open text files)
   dirty: new Set(),
   errors: new Map(), // path -> {line, message}
-  autorun: LS.get('lws.autorun', false),
   api: null,
   hasRun: false,
   lastError: false,
@@ -50,17 +52,18 @@ let tree;
 
 async function init() {
   hydrateIcons();
+  for (const k of document.querySelectorAll('kbd.mod')) k.textContent = modKey;
+  applyTheme();
   initLayout($('#app'));
   setSidebarVisible(LS.get('lws.sidebar', innerWidth > 860), false);
-  updateThemeButton();
-  setAutorun(state.autorun);
 
   consolePanel = new ConsolePanel($('#console-output'), {
     filter: $('#console-filter'), level: $('#console-level'), autoscroll: $('#console-autoscroll'),
-    clear: $('#console-clear'), badge: $('#console-badge'),
+    clear: $('#console-clear'), copy: $('#console-copy'), badge: $('#console-badge'),
   }, {
     fileExists: (p) => state.entries.get(p)?.kind === 'file',
     onOpenLocation: (path, line) => openFile(path, { line }),
+    onCopied: (n) => flashStatus(`Copied ${n} console line${n === 1 ? '' : 's'}`),
   });
 
   runner = new Runner($('#game-stage'), {
@@ -99,6 +102,8 @@ async function init() {
     },
   });
   attachCompletions();
+  applyAllSettings();
+  settings.onChange(onSettingChanged);
   $('#app').classList.remove('booting');
 
   let opened = false;
@@ -250,7 +255,7 @@ async function openProjectsDialog() {
         onclick: async () => { dlgFinish?.(null); if (!current) await openProject(p.id); },
         onkeydown: (e) => { if (e.key === 'Enter' && e.target === item) item.click(); },
       },
-      h('span', { class: current ? 'heart' : 'preview-icon' }, icon(current ? 'heart' : 'folder', 16)),
+      h('span', { class: 'preview-icon' }, icon(current ? 'folderOpen' : 'folder', 16)),
       h('div', { class: 'project-info' },
         h('div', { class: 'project-title' }, p.name),
         h('div', { class: 'project-meta' }, current ? 'Open now · ' : '', `Edited ${timeAgo(p.updated)}`)),
@@ -462,8 +467,13 @@ function showEmptyEditor() {
   persistTabs();
 }
 
+let autoSaveTimer = 0;
 function onEditorChange(path) {
   if (!path) return;
+  if (settings.get('autoSave') === 'delay') {
+    clearTimeout(autoSaveTimer);
+    autoSaveTimer = setTimeout(() => saveAll({ quiet: true }), 1000);
+  }
   const wasDirty = state.dirty.has(path);
   const isDirty = editor.getText(path) !== state.saved.get(path);
   if (wasDirty === isDirty) return;
@@ -475,6 +485,7 @@ function onEditorChange(path) {
 
 async function saveFile(path) {
   if (!editor.has(path)) return false;
+  editor.normalize(path, { trim: settings.get('trimWhitespaceOnSave'), finalNewline: settings.get('finalNewlineOnSave') });
   const text = editor.getText(path);
   await store.writeFile(state.project.id, path, text);
   const entry = state.entries.get(path);
@@ -501,7 +512,7 @@ async function saveActive() {
   renderTabs();
   tree.render();
   flashStatus(`Saved ${baseName(state.active)}`);
-  if (state.autorun) run({ focus: false });
+  if (settings.get('autorun')) run({ focus: false });
 }
 
 let statusTimer = 0;
@@ -829,11 +840,31 @@ async function reportCompat(files) {
     return 0;
   }
   for (const i of issues) consolePanel.info(`${i.path}:${i.line}: ${i.message}`, COMPAT_KIND[i.severity]);
+  setProblems(issues);
   return issues.filter((i) => i.severity === 'error').length;
 }
 
+/** Status bar summary of the last compatibility check. */
+function setProblems(issues) {
+  const el = $('#status-problems');
+  const errors = issues.filter((i) => i.severity === 'error').length;
+  const warnings = issues.filter((i) => i.severity === 'warning').length;
+  el.hidden = !errors && !warnings;
+  el.className = `status-item ${errors ? 'has-errors' : warnings ? 'has-warnings' : ''}`;
+  el.replaceChildren(icon('alert', 13), `${errors + warnings} web issue${errors + warnings === 1 ? '' : 's'}`);
+  state.problems = issues.filter((i) => i.severity !== 'info');
+}
+
+function showProblems() {
+  const items = (state.problems || []).map((i) => ({
+    label: `${i.path}:${i.line}`, hint: i.message, icon: i.severity === 'error' ? 'alert' : 'info',
+    run: () => openFile(i.path, { line: i.line, focus: true }),
+  }));
+  openPicker({ placeholder: 'Go to a web compatibility issue', items, emptyText: 'No issues' });
+}
+
 /** focus: give the game keyboard focus once it starts (not for auto-run). */
-async function run({ focus = true } = {}) {
+async function run({ focus = settings.get('focusGameOnRun') } = {}) {
   if (!state.project) return;
   const files = await collectFiles();
   if (!files['main.lua']) {
@@ -841,7 +872,7 @@ async function run({ focus = true } = {}) {
     toast('Add a main.lua to run the game.', { type: 'error' });
     return;
   }
-  if (LS.get('lws.clearOnRun', true)) consolePanel.clear();
+  if (settings.get('clearConsoleOnRun')) consolePanel.clear();
   consolePanel.separator(`Run · ${new Date().toLocaleTimeString()}`);
   state.errors.clear();
   editor.clearErrors();
@@ -849,8 +880,12 @@ async function run({ focus = true } = {}) {
   state.hasRun = true;
   renderTabs();
   $('#game-title').textContent = state.project.name;
-  runner.run({ files }, { focus });
-  reportCompat(files);
+  const query = {};
+  if (settings.get('scaleMode') !== 'fit') query.scale = settings.get('scaleMode');
+  if (!settings.get('jit')) query.jit = '0';
+  runner.run({ files }, { focus, query });
+  if (settings.get('compatCheck')) reportCompat(files);
+  else setProblems([]);
 }
 
 function stop() {
@@ -949,6 +984,7 @@ async function exportWeb() {
 }
 
 async function warnCompat(files) {
+  if (!settings.get('compatCheck')) return;
   consolePanel.separator(`Web compatibility · ${new Date().toLocaleTimeString()}`);
   const errors = await reportCompat(files);
   if (errors) toast(`${errors} part${errors === 1 ? '' : 's'} of this game won't work on the web. See the console.`, { type: 'error', timeout: 6000 });
@@ -1015,121 +1051,169 @@ function showImportMenu() {
 }
 
 // ---------------------------------------------------------------------------
-// Dialogs: shortcuts, quick open
+// Commands, settings, palette
 
-function showShortcuts() {
-  const mod = isMac ? '⌘' : 'Ctrl';
-  const alt = isMac ? '⌥' : 'Alt';
-  const groups = [
+const alt = isMac ? '⌥' : 'Alt';
+
+/**
+ * Every command the user can run: shown in the command palette and in the
+ * shortcuts list. `keys` is for display; handleShortcut does the matching.
+ */
+function commandList() {
+  const m = modKey;
+  return [
     ['Run', [
-      ['Save and run', ['F5'], [mod, 'Enter']], ['Stop', ['Shift', 'F5']], ['Restart', [mod, 'Shift', 'Enter']], ['Pause / resume', ['F8']],
+      { id: 'run', label: 'Run game', keys: [['F5'], [m, 'Enter']], icon: 'play', run: () => run() },
+      { id: 'stop', label: 'Stop game', keys: [['Shift', 'F5']], icon: 'stop', run: stop },
+      { id: 'pause', label: 'Pause or resume game', keys: [['F8']], icon: 'pause', run: togglePause },
+      { id: 'autorun', label: () => `${settings.get('autorun') ? 'Turn off' : 'Turn on'} run after saving`, icon: 'zap', run: () => toggleSetting('autorun', 'Run after saving') },
+      { id: 'fullscreen', label: 'Game fullscreen', icon: 'maximize', run: toggleGameFullscreen },
+      { id: 'popout', label: 'Open game in a new window', icon: 'popout', run: popOutGame },
+      { id: 'compat', label: 'Check web compatibility', icon: 'alert', run: async () => { await saveAll({ quiet: true }); consolePanel.separator('Web compatibility'); const n = await reportCompat(await collectFiles()); if (!(state.problems || []).length) flashStatus('No web compatibility issues'); else if (n) showProblems(); } },
     ]],
     ['Files', [
-      ['Save', [mod, 'S']], ['Save all', [mod, 'Shift', 'S']], ['Quick open', [mod, 'P']], ['Projects', [mod, 'O']],
-      ['New file', [alt, 'N']], ['Close tab', [alt, 'W']], ['Next / previous tab', [alt, ']'], [alt, '[']], ['Toggle file panel', [mod, 'B']],
+      { id: 'quickOpen', label: 'Go to file', keys: [[m, 'P']], icon: 'search', run: quickOpen },
+      { id: 'symbol', label: 'Go to function in file', keys: [[m, 'Shift', 'O']], icon: 'hash', run: goToSymbol },
+      { id: 'save', label: 'Save', keys: [[m, 'S']], icon: 'save', run: saveActive },
+      { id: 'saveAll', label: 'Save all', keys: [[m, 'Shift', 'S']], icon: 'save', run: () => saveAll() },
+      { id: 'newFile', label: 'New file', keys: [[alt, 'N']], icon: 'filePlus', run: () => newFile('') },
+      { id: 'newFolder', label: 'New folder', icon: 'folderPlus', run: () => newFolder('') },
+      { id: 'closeTab', label: 'Close tab', keys: [[alt, 'W']], icon: 'x', run: () => closeTab(state.active) },
+      { id: 'nextTab', label: 'Next tab', keys: [[alt, ']']], run: () => cycleTab(1) },
+      { id: 'prevTab', label: 'Previous tab', keys: [[alt, '[']], run: () => cycleTab(-1) },
+      { id: 'import', label: 'Import files', icon: 'upload', run: () => importTarget('files', '') },
     ]],
-    ['Editing', [
-      ['Autocomplete', ['Ctrl', 'Space']], ['Find', [mod, 'F']], ['Find and replace', [mod, 'H']], ['Go to line', [mod, 'G']],
-      ['Toggle comment', [mod, '/']], ['Indent / outdent', ['Tab'], ['Shift', 'Tab']], ['Select next match', [mod, 'D']], ['Undo / redo', [mod, 'Z'], [mod, 'Shift', 'Z']],
+    ['Project', [
+      { id: 'projects', label: 'Open project', keys: [[m, 'O']], icon: 'folderOpen', run: openProjectsDialog },
+      { id: 'share', label: 'Copy share link', icon: 'link', run: share },
+      { id: 'exportLove', label: 'Download .love', icon: 'package', run: exportLove },
+      { id: 'exportWeb', label: 'Export for web (.zip)', icon: 'globe', run: exportWeb },
     ]],
-    ['Help', [['Keyboard shortcuts', ['F1']]]],
+    ['Editor', [
+      { id: 'find', label: 'Find', keys: [[m, 'F']], icon: 'search', run: () => editor.openSearch() },
+      { id: 'replace', label: 'Find and replace', keys: [[m, 'H']], run: () => editor.openSearch() },
+      { id: 'gotoLine', label: 'Go to line', keys: [[m, 'G']], run: () => editor.openGotoLine() },
+      { id: 'wrap', label: () => `${settings.get('wordWrap') ? 'Turn off' : 'Turn on'} word wrap`, keys: [[alt, 'Z']], icon: 'wrap', run: () => toggleSetting('wordWrap', 'Word wrap') },
+      { id: 'zoomIn', label: 'Increase font size', keys: [[m, '=']], run: () => zoomEditor(1) },
+      { id: 'zoomOut', label: 'Decrease font size', keys: [[m, '-']], run: () => zoomEditor(-1) },
+      { id: 'zoomReset', label: 'Reset font size', keys: [[m, '0']], run: () => zoomEditor(0) },
+      { id: 'comment', label: 'Toggle comment', keys: [[m, '/']] },
+      { id: 'complete', label: 'Show suggestions', keys: [['Ctrl', 'Space']] },
+      { id: 'selectNext', label: 'Select next match', keys: [[m, 'D']] },
+      { id: 'indent', label: 'Indent / outdent', keys: [['Tab'], ['Shift', 'Tab']] },
+    ]],
+    ['View', [
+      { id: 'palette', label: 'Command palette', keys: [[m, 'Shift', 'P'], ['F1']], icon: 'command', run: commandPalette },
+      { id: 'settings', label: 'Settings', keys: [[m, ',']], icon: 'settings', run: () => showSettings() },
+      { id: 'shortcuts', label: 'Keyboard shortcuts', icon: 'keyboard', run: () => showSettings('shortcuts') },
+      { id: 'sidebar', label: 'Toggle file panel', keys: [[m, 'B']], icon: 'sidebar', run: () => setSidebarVisible($('#app').classList.contains('sidebar-hidden')) },
+      { id: 'theme', label: () => `Switch to ${document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark'} theme`, icon: 'sun', run: () => settings.set('theme', document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark') },
+      { id: 'clearConsole', label: 'Clear console', icon: 'clear', run: () => consolePanel.clear() },
+      { id: 'copyConsole', label: 'Copy console output', icon: 'copy', run: () => consolePanel.copyAll() },
+    ]],
+    ['Help', [
+      { id: 'docs', label: 'LÖVE documentation', icon: 'book', run: () => window.open('https://love2d.org/wiki/Main_Page', '_blank', 'noopener') },
+      { id: 'source', label: 'Smitten on GitHub', icon: 'globe', run: () => window.open('https://github.com/Mostlime12195/smitten', '_blank', 'noopener') },
+    ]],
   ];
-  const body = h('div', { class: 'shortcuts' });
-  for (const [title, rows] of groups) {
-    body.append(h('h3', {}, title));
-    for (const [label, ...combos] of rows) {
-      const keys = h('span', {});
-      combos.forEach((combo, i) => {
-        if (i) keys.append(' ');
-        for (const k of combo) keys.append(h('kbd', {}, k));
-      });
-      body.append(h('div', { class: 'shortcut' }, h('span', {}, label), keys));
-    }
-  }
-  openDialog({ title: 'Keyboard shortcuts', body, wide: true });
 }
 
-function fuzzyScore(query, text) {
-  if (!query) return { score: 0, marks: [] };
-  const q = query.toLowerCase();
-  const t = text.toLowerCase();
-  const marks = [];
-  let ti = 0;
-  let score = 0;
-  for (const ch of q) {
-    const i = t.indexOf(ch, ti);
-    if (i < 0) return null;
-    score += i === ti ? 3 : 1;
-    if (i === 0 || '/._- '.includes(t[i - 1])) score += 2;
-    marks.push(i);
-    ti = i + 1;
+const labelOf = (c) => (typeof c.label === 'function' ? c.label() : c.label);
+
+function commandPalette() {
+  const items = [];
+  for (const [group, cmds] of commandList()) {
+    for (const c of cmds) if (c.run) items.push({ label: labelOf(c), hint: group, keys: c.keys, icon: c.icon || 'command', run: c.run });
   }
-  return { score: score - t.length * 0.05, marks };
+  openPicker({ placeholder: 'Type a command', items });
+}
+
+function showSettings(section) {
+  const shortcutGroups = commandList().map(([group, cmds]) => [group, cmds.filter((c) => c.keys).map((c) => ({ label: labelOf(c), keys: c.keys }))]).filter(([, rows]) => rows.length);
+  openSettings({ section, shortcutGroups });
+}
+
+function showHelpMenu() {
+  showMenu($('#btn-help'), [
+    { label: 'Command palette', icon: 'command', shortcut: `${modKey} Shift P`, action: commandPalette },
+    { label: 'Keyboard shortcuts', icon: 'keyboard', action: () => showSettings('shortcuts') },
+    '-',
+    { label: 'LÖVE documentation', icon: 'book', action: () => window.open('https://love2d.org/wiki/Main_Page', '_blank', 'noopener') },
+    { label: 'Lua compatibility notes', icon: 'info', action: () => window.open('https://github.com/Mostlime12195/smitten#lua-compatibility', '_blank', 'noopener') },
+    { label: 'Smitten on GitHub', icon: 'globe', action: () => window.open('https://github.com/Mostlime12195/smitten', '_blank', 'noopener') },
+  ]);
+}
+
+function toggleSetting(key, label) {
+  settings.set(key, !settings.get(key));
+  flashStatus(`${label}: ${settings.get(key) ? 'on' : 'off'}`);
+}
+
+function zoomEditor(dir) {
+  const size = dir === 0 ? 13 : Math.min(28, Math.max(9, settings.get('editorFontSize') + dir));
+  settings.set('editorFontSize', size);
+  flashStatus(`Font size ${size}px`);
+}
+
+function applyAllSettings() {
+  for (const [k, v] of Object.entries(settings.all())) onSettingChanged(k, v);
+}
+
+function onSettingChanged(key, value) {
+  switch (key) {
+    case 'editorFontSize':
+      document.documentElement.style.setProperty('--editor-font-size', `${value}px`);
+      editor?.remeasure();
+      break;
+    case 'consoleTimestamps': consolePanel.setTimestamps(value); break;
+    case 'consoleWrap': consolePanel.setWrap(value); break;
+    case 'autoSave': clearTimeout(autoSaveTimer); break;
+    default: break;
+  }
+  if (['tabSize', 'insertSpaces', 'wordWrap', 'lineNumbers', 'highlightActiveLine', 'closeBrackets', 'autocomplete', 'showWhitespace'].includes(key)) {
+    editor?.applySettings(settings.all());
+  }
+  if (key === 'tabSize' || key === 'insertSpaces') updateIndentStatus();
+}
+
+function updateIndentStatus() {
+  $('#status-indent').textContent = settings.get('insertSpaces') ? `Spaces: ${settings.get('tabSize')}` : `Tab size: ${settings.get('tabSize')}`;
 }
 
 function quickOpen() {
   const files = [...state.entries.values()].filter((e) => e.kind === 'file').map((e) => e.path);
-  const input = h('input', { class: 'input', type: 'text', placeholder: 'Go to file…', 'aria-label': 'File name', spellcheck: 'false', autocomplete: 'off' });
-  const listEl = h('div', { class: 'quick-list', role: 'listbox' });
-  let results = [];
-  let sel = 0;
-  let finish = null;
-  const render = () => {
-    const q = input.value.trim();
-    results = files.map((p) => ({ p, r: fuzzyScore(q, p) })).filter((x) => x.r).sort((a, b) => b.r.score - a.r.score || a.p.localeCompare(b.p)).slice(0, 50);
-    sel = Math.min(sel, Math.max(0, results.length - 1));
-    listEl.replaceChildren(...results.map(({ p, r }, i) => {
-      const name = h('span', {});
-      [...p].forEach((ch, ci) => name.append(r.marks.includes(ci) ? h('mark', {}, ch) : ch));
-      const item = h('div', { class: 'quick-item', role: 'option', 'aria-selected': String(i === sel), onclick: () => choose(i) }, icon(iconFor(p, state.entries.get(p).data), 14), name);
-      return item;
-    }));
-    if (!results.length) listEl.append(h('div', { class: 'quick-item' }, 'No matching files'));
-    listEl.querySelector('[aria-selected="true"]')?.scrollIntoView({ block: 'nearest' });
-  };
-  const choose = (i) => {
-    const r = results[i];
-    if (!r) return;
-    finish?.(null);
-    openFile(r.p, { focus: true });
-  };
-  input.addEventListener('input', () => { sel = 0; render(); });
-  input.addEventListener('keydown', (e) => {
-    if (e.key === 'ArrowDown') { e.preventDefault(); sel = Math.min(results.length - 1, sel + 1); render(); }
-    else if (e.key === 'ArrowUp') { e.preventDefault(); sel = Math.max(0, sel - 1); render(); }
-    else if (e.key === 'Enter') { e.preventDefault(); choose(sel); }
+  // Open tabs first (most useful when the query is empty), then the rest.
+  const ordered = [...state.tabs.filter((p) => files.includes(p) && p !== state.active), ...files.filter((p) => !state.tabs.includes(p) || p === state.active)];
+  openPicker({
+    placeholder: 'Go to file',
+    items: ordered.map((p) => ({ label: p, icon: iconFor(p, state.entries.get(p).data), run: () => openFile(p, { focus: true }) })),
+    emptyText: 'No matching files',
   });
-  render();
-  openDialog({ title: 'Go to file', body: h('div', {}, input, listEl), className: 'quick-open', onOpen: (dlg, f) => { finish = f; input.focus(); } });
+}
+
+/** Functions defined in the open Lua file. */
+function goToSymbol() {
+  const path = state.active;
+  if (!path || !path.endsWith('.lua') || !editor.has(path)) {
+    flashStatus('Open a Lua file to list its functions');
+    return;
+  }
+  const items = [];
+  const re = /^\s*(?:local\s+)?function\s+([\w.:]+)\s*\(|^\s*(?:local\s+)?([\w.:]+)\s*=\s*function\s*\(/;
+  editor.getText(path).split('\n').forEach((text, i) => {
+    const m = re.exec(text);
+    if (m) items.push({ label: m[1] || m[2], hint: `line ${i + 1}`, icon: 'hash', run: () => openFile(path, { line: i + 1, focus: true }) });
+  });
+  openPicker({ placeholder: `Go to function in ${baseName(path)}`, items, emptyText: 'No functions in this file' });
 }
 
 // ---------------------------------------------------------------------------
-// Shell: theme, sidebar, autorun, keyboard, drag & drop
-
-function updateThemeButton() {
-  const dark = document.documentElement.dataset.theme !== 'light';
-  const btn = $('#btn-theme');
-  btn.replaceChildren(icon(dark ? 'sun' : 'moon'));
-  btn.title = dark ? 'Switch to light theme' : 'Switch to dark theme';
-}
-
-function toggleTheme() {
-  const next = document.documentElement.dataset.theme === 'light' ? 'dark' : 'light';
-  document.documentElement.dataset.theme = next;
-  try { localStorage.setItem('lws.theme', next); } catch { /* ignore */ }
-  updateThemeButton();
-}
+// Shell: sidebar, keyboard, drag & drop
 
 function setSidebarVisible(visible, persist = true) {
   $('#app').classList.toggle('sidebar-hidden', !visible);
   $('#btn-sidebar').setAttribute('aria-pressed', String(visible));
   if (persist) LS.set('lws.sidebar', visible);
-}
-
-function setAutorun(on) {
-  state.autorun = on;
-  $('#btn-autorun').setAttribute('aria-pressed', String(on));
-  LS.set('lws.autorun', on);
 }
 
 function cycleTab(dir) {
@@ -1151,7 +1235,13 @@ function handleShortcut(e, fromGame = false) {
   if (mod && lower === 's') { if (e.shiftKey) saveAll(); else saveActive(); return true; }
   if (fromGame) return false;
 
-  if (key === 'F1') { showShortcuts(); return true; }
+  if (key === 'F1' || (mod && e.shiftKey && lower === 'p')) { commandPalette(); return true; }
+  if (mod && !e.shiftKey && key === ',') { showSettings(); return true; }
+  if (mod && e.shiftKey && lower === 'o') { goToSymbol(); return true; }
+  if (mod && !e.altKey && (key === '=' || key === '+')) { zoomEditor(1); return true; }
+  if (mod && !e.altKey && key === '-') { zoomEditor(-1); return true; }
+  if (mod && !e.altKey && key === '0') { zoomEditor(0); return true; }
+  if (e.altKey && !mod && e.code === 'KeyZ') { toggleSetting('wordWrap', 'Word wrap'); return true; }
   if (mod && !e.shiftKey && lower === 'p') { quickOpen(); return true; }
   if (mod && !e.shiftKey && lower === 'o') { openProjectsDialog(); return true; }
   if (mod && !e.shiftKey && lower === 'b') { setSidebarVisible($('#app').classList.contains('sidebar-hidden')); return true; }
@@ -1175,15 +1265,20 @@ function wireUi() {
   $('#btn-stop').addEventListener('click', stop);
   $('#btn-restart').addEventListener('click', () => run());
   $('#btn-pause').addEventListener('click', togglePause);
-  $('#btn-autorun').addEventListener('click', () => {
-    setAutorun(!state.autorun);
-    toast(state.autorun ? 'Auto-run on: the game restarts every time you save.' : 'Auto-run off.');
-  });
   $('#btn-project').addEventListener('click', openProjectsDialog);
   $('#btn-share').addEventListener('click', share);
   $('#btn-export').addEventListener('click', showExportMenu);
-  $('#btn-theme').addEventListener('click', toggleTheme);
-  $('#btn-help').addEventListener('click', showShortcuts);
+  $('#btn-help').addEventListener('click', showHelpMenu);
+  $('#btn-settings').addEventListener('click', () => showSettings());
+  $('#status-cursor').addEventListener('click', () => editor.openGotoLine());
+  $('#status-indent').addEventListener('click', () => showSettings('editor'));
+  $('#status-problems').addEventListener('click', showProblems);
+  updateIndentStatus();
+
+  // Auto save when leaving the editor or the page.
+  const saveOnLeave = () => { if (settings.get('autoSave') === 'blur' && state.dirty.size) saveAll({ quiet: true }); };
+  $('#editor-host').addEventListener('focusout', saveOnLeave);
+  window.addEventListener('blur', saveOnLeave);
   $('#btn-sidebar').addEventListener('click', () => setSidebarVisible($('#app').classList.contains('sidebar-hidden')));
   $('#btn-new-file').addEventListener('click', () => newFile(''));
   $('#btn-new-folder').addEventListener('click', () => newFolder(''));

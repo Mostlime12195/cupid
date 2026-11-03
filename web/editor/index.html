@@ -8,11 +8,17 @@
 <meta name="color-scheme" content="dark light">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><path fill='%23e74a99' d='M19 14c1.49-1.46 3-3.21 3-5.5A5.5 5.5 0 0 0 16.5 3c-1.76 0-3 .5-4.5 2-1.5-1.5-2.74-2-4.5-2A5.5 5.5 0 0 0 2 8.5c0 2.3 1.5 4.05 3 5.5l7 7Z'/></svg>">
 <script>
-  // Apply the saved theme before first paint.
-  try {
-    const t = localStorage.getItem('lws.theme');
-    if (t === 'light' || t === 'dark') document.documentElement.dataset.theme = t;
-  } catch (e) {}
+  // Apply the saved theme before first paint (see settings.js).
+  (function () {
+    var t = 'system';
+    try {
+      var s = JSON.parse(localStorage.getItem('smitten.settings') || '{}');
+      if (s && s.theme) t = s.theme;
+      else if (localStorage.getItem('lws.theme')) t = JSON.parse(localStorage.getItem('lws.theme'));
+    } catch (e) {}
+    if (t !== 'light' && t !== 'dark') t = matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+    document.documentElement.dataset.theme = t;
+  })();
 </script>
 <!-- CodeMirror 6, pinned. Every package resolves its dependencies through
      this map ("*" = external deps on esm.sh), so there is exactly one copy of
@@ -45,21 +51,21 @@
   <header class="topbar">
     <button id="btn-sidebar" class="icon-btn" type="button" data-icon="sidebar" title="Toggle file panel (Ctrl+B)" aria-label="Toggle file panel" aria-pressed="true"></button>
     <a class="brand" href="./" title="Smitten">
-      <span class="brand-heart" aria-hidden="true">❤</span>
+      <span class="brand-mark" data-icon="heart" data-icon-size="16"></span>
       <span class="brand-name">Smitten</span>
     </a>
     <span class="topbar-sep" aria-hidden="true"></span>
-    <button id="btn-project" class="project-btn" type="button" aria-haspopup="dialog" title="Switch project (Ctrl+O)">
+    <button id="btn-project" class="project-btn" type="button" aria-haspopup="dialog" title="Projects (Ctrl+O)">
       <span id="project-name" class="project-name">Loading…</span>
       <span class="chev" data-icon="chevronDown" data-icon-size="14"></span>
     </button>
+    <span class="topbar-sep" aria-hidden="true"></span>
 
     <div class="toolbar run-controls" role="toolbar" aria-label="Run controls">
-      <button id="btn-run" class="btn primary run-btn" type="button" data-icon="play" title="Save and run (F5 or Ctrl+Enter)"><span class="label">Run</span></button>
+      <button id="btn-run" class="btn primary run-btn" type="button" data-icon="play" data-icon-size="14" title="Save and run (F5)"><span class="label">Run</span></button>
       <button id="btn-stop" class="icon-btn" type="button" data-icon="stop" title="Stop (Shift+F5)" aria-label="Stop" disabled></button>
-      <button id="btn-restart" class="icon-btn" type="button" data-icon="restart" title="Restart (Ctrl+Shift+Enter)" aria-label="Restart" disabled></button>
+      <button id="btn-restart" class="icon-btn" type="button" data-icon="restart" title="Restart (F5)" aria-label="Restart" disabled></button>
       <button id="btn-pause" class="icon-btn" type="button" data-icon="pause" title="Pause (F8)" aria-label="Pause" aria-pressed="false" disabled></button>
-      <button id="btn-autorun" class="toggle-btn" type="button" data-icon="zap" aria-pressed="false" title="Run automatically after saving"><span class="label">Auto-run</span></button>
     </div>
 
     <div class="spacer"></div>
@@ -67,8 +73,9 @@
     <div class="toolbar" role="toolbar" aria-label="Project actions">
       <button id="btn-share" class="btn ghost" type="button" data-icon="link" title="Copy a link that contains this project"><span class="label">Share</span></button>
       <button id="btn-export" class="btn ghost" type="button" data-icon="download" aria-haspopup="menu" title="Export or download the project"><span class="label">Export</span></button>
-      <button id="btn-theme" class="icon-btn" type="button" title="Switch to light theme" aria-label="Toggle light or dark theme"></button>
-      <button id="btn-help" class="icon-btn" type="button" data-icon="keyboard" title="Keyboard shortcuts (F1)" aria-label="Keyboard shortcuts"></button>
+      <span class="topbar-sep" aria-hidden="true"></span>
+      <button id="btn-help" class="icon-btn" type="button" data-icon="help" aria-haspopup="menu" title="Help" aria-label="Help"></button>
+      <button id="btn-settings" class="icon-btn" type="button" data-icon="settings" title="Settings (Ctrl+,)" aria-label="Settings"></button>
     </div>
   </header>
 
@@ -98,23 +105,26 @@
         <div id="editor-host"></div>
         <div id="preview" hidden></div>
         <div id="editor-empty" class="empty-state" hidden>
-          <div class="empty-heart" aria-hidden="true">❤</div>
+          <span class="empty-icon" data-icon="code" data-icon-size="32"></span>
           <h2>No file open</h2>
-          <p>Pick a file in the sidebar, or press <kbd class="mod">Ctrl</kbd> <kbd>P</kbd> to find one.</p>
+          <p>Pick a file in the sidebar, or find one by name.</p>
           <ul class="shortcut-list">
+            <li><span>Go to file</span><span><kbd class="mod">Ctrl</kbd><kbd>P</kbd></span></li>
+            <li><span>Command palette</span><span><kbd class="mod">Ctrl</kbd><kbd>Shift</kbd><kbd>P</kbd></span></li>
             <li><span>Run the game</span><span><kbd>F5</kbd></span></li>
-            <li><span>Save</span><span><kbd class="mod">Ctrl</kbd> <kbd>S</kbd></span></li>
-            <li><span>All shortcuts</span><span><kbd>F1</kbd></span></li>
+            <li><span>Settings</span><span><kbd class="mod">Ctrl</kbd><kbd>,</kbd></span></li>
           </ul>
         </div>
         <div id="editor-loading" class="loading-state"><span class="spinner" aria-hidden="true"></span>Loading editor…</div>
       </div>
       <div id="statusbar">
+        <button id="status-problems" class="status-item" type="button" title="Web compatibility issues found by the last check" hidden></button>
         <span id="status-left"></span>
         <span class="spacer"></span>
-        <span id="status-cursor"></span>
-        <span id="status-lang"></span>
-        <span id="status-engine" title="Engine version"></span>
+        <button id="status-cursor" class="status-item" type="button" title="Go to line (Ctrl+G)"></button>
+        <button id="status-indent" class="status-item" type="button" title="Indentation (change in Settings)"></button>
+        <span id="status-lang" class="status-item static"></span>
+        <span id="status-engine" class="status-item static" title="Engine version"></span>
       </div>
     </section>
 
@@ -133,7 +143,7 @@
         </div>
         <div id="game-stage">
           <div id="game-empty" class="empty-state compact">
-            <button id="btn-run-big" class="play-big" type="button" title="Run (F5)" aria-label="Run the game" data-icon="play" data-icon-size="28"></button>
+            <button id="btn-run-big" class="play-big" type="button" title="Run (F5)" aria-label="Run the game" data-icon="play" data-icon-size="20"></button>
             <p id="game-empty-text">Press <kbd>F5</kbd> to run your game</p>
           </div>
           <div id="game-loading" class="loading-state" hidden><span class="spinner" aria-hidden="true"></span>Starting LÖVE…</div>
@@ -155,6 +165,7 @@
               <option value="err">Errors</option>
             </select>
             <button id="console-autoscroll" class="icon-btn small toggle" type="button" data-icon="scrollDown" title="Auto-scroll" aria-label="Auto-scroll" aria-pressed="true"></button>
+            <button id="console-copy" class="icon-btn small" type="button" data-icon="copy" title="Copy console output" aria-label="Copy console output"></button>
             <button id="console-clear" class="icon-btn small" type="button" data-icon="clear" title="Clear console" aria-label="Clear console"></button>
           </div>
         </div>
