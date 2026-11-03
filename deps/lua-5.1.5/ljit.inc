@@ -539,8 +539,8 @@ enum {
 /* Locals of the compiled function. Param 0 is L. They are followed by one
 ** f64 local per Lua register, V_DREG(r), that holds the register's number
 ** while it is known to be one (see "Speculation" below). */
-enum { V_L = 0, V_BASE, V_IDX, V_T, V_R, V_TAB, V_S, V_D1, V_D2 };
-#define NUM_I32_LOCALS 6  /* V_BASE .. V_S */
+enum { V_L = 0, V_BASE, V_IDX, V_T, V_R, V_TAB, V_S, V_E, V_D1, V_D2 };
+#define NUM_I32_LOCALS 7  /* V_BASE .. V_E */
 #define V_DREG(r) (V_D2 + 1 + (r))
 
 /* Offsets in TValue / lua_State used by the generated code. */
@@ -628,6 +628,10 @@ typedef struct Compiler {
   int *work;       /* the analysis's worklist */
   int *stub;       /* per instruction: entry stub number, or -1 */
   char *seen, *queued;
+  /* Innermost loops are wasm loops (see compile_body) */
+  int *head;       /* per instruction inside a loop, past its head: the head */
+  int *loopend;    /* per loop head: the loop's last instruction */
+  int *topcount;   /* per instruction: blocks of the dispatcher before it */
   RegSet cur;      /* the same, as the current instruction's code goes */
   int exitlabel;   /* label of the deopt exit, at depth 0 */
 } Compiler;
@@ -780,18 +784,35 @@ static void guard (Compiler *cc, int r, int idx) {
   rs_add(&cc->cur, r);
 }
 
+/* Loads every register in `set` into its local, leaving the compiled code
+** at instruction `idx` if any isn't a number (one branch for all: this is
+** emitted after every helper call). The current set is left as it was. */
+static void guard_all (Compiler *cc, const RegSet *set, int idx) {
+  int r, n = 0;
+  for (r = 0; r < LJIT_MAXREGS; r++) {
+    if (!rs_has(set, r)) continue;
+    not_number(cc, r);
+    if (n++) op(cc, W_I32_OR);
+  }
+  if (n == 0) return;
+  block(cc, W_IF, W_VOID);
+  deopt(cc, idx);
+  end(cc);
+  for (r = 0; r < LJIT_MAXREGS; r++) {
+    if (!rs_has(set, r)) continue;
+    lget(cc, V_BASE);
+    mem(cc, W_F64_LOAD, 3, reg(r) + TV_VALUE);
+    lset(cc, V_DREG(r));
+  }
+}
+
 /* After a helper call, which may have run any Lua code (a metamethod, a
 ** hook, a function that changes our locals with debug.setlocal), before
 ** going on to instruction s: reloads the registers s expects to be known
 ** numbers, checking that they still are. */
 static void reestablish (Compiler *cc, int s) {
-  RegSet saved = cc->cur;
-  int r;
   if (s < 0 || s >= cc->n || rs_empty(&cc->known[s])) return;
-  memset(&cc->cur, 0, sizeof(cc->cur));
-  for (r = 0; r < LJIT_MAXREGS; r++)
-    if (rs_has(&cc->known[s], r)) guard(cc, r, s);
-  cc->cur = saved;
+  guard_all(cc, &cc->known[s], s);
 }
 
 /* Instruction k's single successor (for helpers that don't jump). */
@@ -804,17 +825,54 @@ static void helper_exec (Compiler *cc) {
   reestablish(cc, next_insn(cc, cc->pcidx));
 }
 
+static void hook_check (Compiler *cc, int t);
+
+/* The innermost loop instruction k is in (its head, if k is the head of
+** one), or -1. */
+static int loop_of (Compiler *cc, int k) {
+  if (cc->head[k] >= 0) return cc->head[k];
+  return cc->loopend[k] >= 0 ? k : -1;
+}
+
+/* Label, at depth 0 of the current instruction, of the dispatcher's block
+** for instruction m (outside any loop, past the current one), or with
+** m = n, of the dispatcher's loop. */
+static int top_label (Compiler *cc, int m) {
+  int k = cc->pcidx, h = loop_of(cc, k), from = k, base = 0;
+  if (h >= 0) {
+    from = cc->loopend[h];
+    base = from - k + 1;  /* the loop's blocks past k, and the loop */
+  }
+  return base + cc->topcount[m] - cc->topcount[from + 1];
+}
+
+static void br (Compiler *cc, int label) {
+  b_byte(C, W_BR);
+  b_u32(C, (unsigned int)(cc->depth + label));
+}
+
 /* Continues execution at instruction t. */
 static void jump (Compiler *cc, int t) {
-  int k = cc->pcidx;
-  if (t > k) {
-    b_byte(C, W_BR);
-    b_u32(C, (unsigned int)(cc->depth + (t - (k + 1))));
+  int k = cc->pcidx, h = loop_of(cc, k);
+  if (h >= 0 && t == h) {  /* the loop's back edge */
+    hook_check(cc, t);
+    br(cc, cc->loopend[h] - k);
+  }
+  else if (t > k) {
+    if (h >= 0 && t <= cc->loopend[h])  /* forward in the loop */
+      br(cc, t - k - 1);
+    else if (cc->head[t] < 0)
+      br(cc, top_label(cc, t));
+    else {  /* into a loop: its head's selector goes on to t */
+      i32c(cc, t + 1);
+      lset(cc, V_E);
+      br(cc, top_label(cc, cc->head[t]));
+    }
   }
   else {
-    /* Backward jump: hand over to the interpreter if a hook was set (it
-    ** may have been set by a function called in this loop), else
-    ** dispatch. */
+    /* Backward jump, not an innermost loop's: through the dispatcher.
+    ** Hand over to the interpreter if a hook was set (it may have been set
+    ** by a function called in this loop). */
     lget(cc, V_L);
     mem(cc, W_I32_LOAD8_U, 0, L_HOOKMASK);
     i32c(cc, LUA_MASKLINE | LUA_MASKCOUNT);
@@ -830,9 +888,24 @@ static void jump (Compiler *cc, int t) {
     ** would check and load them (see compile_body). */
     i32c(cc, rs_empty(&cc->known[t]) ? t : cc->n + t);
     lset(cc, V_IDX);
-    b_byte(C, W_BR);
-    b_u32(C, (unsigned int)(cc->depth + (cc->n - 1 - k)));
+    br(cc, top_label(cc, cc->n));
   }
+}
+
+/* For a loop's back edge: hand over to the interpreter if a hook was set
+** (by a function the loop called). */
+static void hook_check (Compiler *cc, int t) {
+  lget(cc, V_L);
+  mem(cc, W_I32_LOAD8_U, 0, L_HOOKMASK);
+  i32c(cc, LUA_MASKLINE | LUA_MASKCOUNT);
+  op(cc, W_I32_AND);
+  b_byte(C, W_IF); b_byte(C, W_VOID);
+  lget(cc, V_L);
+  i32c(cc, (int)pcaddr(cc, t));
+  mem(cc, W_I32_STORE, 2, L_SAVEDPC);
+  i32c(cc, LJIT_INTERP);
+  op(cc, W_RETURN);
+  b_byte(C, W_END);
 }
 
 /* Pushes l_isfalse(register r). */
@@ -1473,10 +1546,9 @@ static void uses_transfer (Compiler *cc, int k, RegSet *s) {
       if (!ISK(b)) rs_add(s, b);
       if (!ISK(c)) rs_add(s, c);
       break;
-    /* (Not OP_FORLOOP's own registers: keeping the loop's index, limit
-    ** and step in locals measured slower than loading them, as the
-    ** interpreter does, probably because they then stay live, in
-    ** registers or spilled, across every inner loop and call.) */
+    case OP_FORLOOP:
+      rs_add(s, a); rs_add(s, a + 1); rs_add(s, a + 2);
+      break;
     default:
       break;
   }
@@ -1890,37 +1962,73 @@ static void instruction (Compiler *cc) {
 /* Largest function compiled: each instruction is a nested block. */
 #define LJIT_MAX_CODE 3000
 
-/* Can the function be entered at k from outside (often)? At 0, after a
-** call (that returned through luaV_execute, or a coroutine resumed), and
-** at loop heads (the interpreter's loop got hot). */
-static int entry_point (Compiler *cc, int k) {
-  Instruction prev;
-  if (k == 0) return 1;
-  prev = cc->p->code[k - 1];
-  if (GET_OPCODE(prev) == OP_CALL) return 1;
-  {
-    int j;
-    for (j = 0; j < cc->n; j++) {
-      Instruction i = cc->p->code[j];
-      int t = -1;
-      if (GET_OPCODE(i) == OP_JMP || GET_OPCODE(i) == OP_FORLOOP)
-        t = j + 1 + GETARG_sBx(i);
-      if (t == k && t <= j) return 1;
+/* Marks in cc->queued the instructions where the function is often entered
+** from outside: 0, after a call (that returned through luaV_execute, or a
+** coroutine resumed), and loop heads (the interpreter's loop got hot). */
+static void entry_points (Compiler *cc) {
+  int k;
+  char *entry = cc->queued;
+  memset(entry, 0, (size_t)cc->n);
+  entry[0] = 1;
+  for (k = 0; k < cc->n; k++) {
+    Instruction i = cc->p->code[k];
+    if (GET_OPCODE(i) == OP_CALL && k + 1 < cc->n) entry[k + 1] = 1;
+    if (GET_OPCODE(i) == OP_JMP || GET_OPCODE(i) == OP_FORLOOP) {
+      int t = k + 1 + GETARG_sBx(i);
+      if (t >= 0 && t <= k) entry[t] = 1;
     }
   }
-  return 0;
+}
+
+/* Finds the innermost loops that can be wasm loops: a backward jump from j
+** to h, with no other backward jump in between (but to h), from which
+** nothing jumps back into (h, j] from after j. Jumps in from before h go
+** through the loop's selector. */
+static void find_loops (Compiler *cc) {
+  int n = cc->n, j, k, s, ns, t[2];
+  for (k = 0; k < n; k++) cc->head[k] = cc->loopend[k] = -1;
+  for (j = 0; j < n; j++) {
+    Instruction i = cc->p->code[j];
+    int h, ok = 1;
+    if (GET_OPCODE(i) != OP_FORLOOP && !(GET_OPCODE(i) == OP_JMP && GETARG_sBx(i) < 0))
+      continue;
+    h = j + 1 + GETARG_sBx(i);
+    if (h < 0 || h > j) continue;
+    for (k = h; k <= j && ok; k++) {
+      if (cc->head[k] >= 0 || cc->loopend[k] >= 0) ok = 0;
+      ns = successors(cc, k, t);
+      for (s = 0; s < ns; s++)
+        if (t[s] < h || (t[s] <= k && t[s] != h)) ok = 0;
+    }
+    for (k = j + 1; k < n && ok; k++) {
+      ns = successors(cc, k, t);
+      for (s = 0; s < ns; s++)
+        if (t[s] > h && t[s] <= j) ok = 0;
+    }
+    if (!ok) continue;
+    cc->loopend[h] = j;
+    for (k = h + 1; k <= j; k++) cc->head[k] = h;
+  }
+  cc->topcount[0] = 0;
+  for (k = 0; k < n; k++)
+    cc->topcount[k + 1] = cc->topcount[k] + (cc->head[k] < 0);
 }
 
 static int compile_body (Compiler *cc) {
   int k, j;
   int n = cc->n;
-  int nstubs = 0;
+  int nstubs = 0, ntop;
   int *stub = cc->stub;
+  find_loops(cc);
+  entry_points(cc);
+  ntop = cc->topcount[n];
   for (k = 0; k < n; k++) {
     stub[k] = -1;
-    if (!rs_empty(&cc->known[k]) && entry_point(cc, k)) stub[k] = nstubs++;
+    /* stubs check known registers, and go into a loop through its head */
+    if (cc->queued[k] && (!rs_empty(&cc->known[k]) || cc->head[k] >= 0))
+      stub[k] = nstubs++;
   }
-  /* locals: base, idx, t, r, tab, s (i32); d1, d2 and one per register (f64) */
+  /* locals: base, idx, t, r, tab, s, e (i32); d1, d2 and one per register (f64) */
   b_u32(C, 2);
   b_u32(C, NUM_I32_LOCALS); b_byte(C, W_TYPE_I32);
   b_u32(C, 2 + cc->p->maxstacksize); b_byte(C, W_TYPE_F64);
@@ -1938,56 +2046,95 @@ static int compile_body (Compiler *cc) {
   /* Layout:
   **   block $exit
   **     loop $dispatch
-  **       block (n: the block of k ends where k's code starts)
+  **       block (one per instruction outside loops, and per loop head:
+  **              the block of k ends where k's code starts)
   **         block (nstubs: stub s's code follows its block)
   **           block $deopt_entry
   **             br_table on idx
   **           end: entering where registers are known, with no stub
   **         stubs: load and check known[k], then on to k's code
-  **       code of each instruction
+  **       code of each instruction; for an innermost loop h..j:
+  **         loop $l
+  **           block (one per instruction h+1..j)
+  **             block $selector: br_table on V_E if set
+  **             code of h
+  **           code of h+1 .. j (j's back edge: br $l)
   **   deopt: L->savedpc = code + idx, return LJIT_DEOPT
   ** idx 0..n-1 enters k through its stub if it has one; n+k enters k
-  ** directly (a backward jump, from where known[k] is known). */
+  ** directly (a backward jump, from where known[k] is known). Going into a
+  ** loop past its head sets V_E to the instruction (+1) and goes to the
+  ** head's block, whose selector goes on to it. */
   b_byte(C, W_BLOCK); b_byte(C, W_VOID);
   b_byte(C, W_LOOP); b_byte(C, W_VOID);
-  for (k = 0; k < n + nstubs + 1; k++) {
+  for (k = 0; k < ntop + nstubs + 1; k++) {
     b_byte(C, W_BLOCK); b_byte(C, W_VOID);
   }
   lget(cc, V_IDX);
   b_byte(C, W_BR_TABLE);
   b_u32(C, 2 * n);
   for (k = 0; k < n; k++) {
-    if (rs_empty(&cc->known[k])) b_u32(C, 1 + nstubs + k);
-    else if (stub[k] >= 0) b_u32(C, 1 + stub[k]);
+    if (stub[k] >= 0) b_u32(C, 1 + stub[k]);
+    else if (rs_empty(&cc->known[k]) && cc->head[k] < 0)
+      b_u32(C, 1 + nstubs + cc->topcount[k]);
     else b_u32(C, 0);
   }
-  for (k = 0; k < n; k++) b_u32(C, 1 + nstubs + k);
+  for (k = 0; k < n; k++)
+    b_u32(C, cc->head[k] < 0 ? 1 + nstubs + cc->topcount[k] : 0);
   b_u32(C, 0);
   b_byte(C, W_END);  /* $deopt_entry: leave at idx */
-  b_byte(C, W_BR); b_u32(C, (unsigned int)(nstubs + n + 1));
+  b_byte(C, W_BR); b_u32(C, (unsigned int)(nstubs + ntop + 1));
   for (j = 0; j < nstubs; j++) {
+    int h;
     b_byte(C, W_END);
     for (k = 0; k < n && stub[k] != j; k++) ;
     cc->pcidx = k;
     cc->depth = 0;
-    cc->exitlabel = (nstubs - 1 - j) + n + 1;
+    cc->exitlabel = (nstubs - 1 - j) + ntop + 1;
     memset(&cc->cur, 0, sizeof(cc->cur));
-    {
-      int r;
-      for (r = 0; r < LJIT_MAXREGS; r++)
-        if (rs_has(&cc->known[k], r)) guard(cc, r, k);
+    guard_all(cc, &cc->known[k], k);
+    h = cc->head[k];
+    if (h >= 0) {
+      i32c(cc, k + 1);
+      lset(cc, V_E);
     }
-    b_byte(C, W_BR); b_u32(C, (unsigned int)((nstubs - 1 - j) + k));
+    else h = k;
+    b_byte(C, W_BR); b_u32(C, (unsigned int)((nstubs - 1 - j) + cc->topcount[h]));
   }
   for (k = 0; k < n; k++) {
     b_byte(C, W_END);  /* code for instruction k follows its block */
+    if (cc->loopend[k] >= 0) {
+      int last = cc->loopend[k], m;
+      b_byte(C, W_LOOP); b_byte(C, W_VOID);
+      for (m = last; m > k; m--) {
+        b_byte(C, W_BLOCK); b_byte(C, W_VOID);
+      }
+      if (last > k) {
+        /* the selector: if V_E is set, V_E = 0 and on to instruction V_E-1 */
+        b_byte(C, W_BLOCK); b_byte(C, W_VOID);
+        lget(cc, V_E);
+        op(cc, W_I32_EQZ);
+        b_byte(C, W_BR_IF); b_u32(C, 0);
+        lget(cc, V_E);
+        i32c(cc, k + 1);
+        op(cc, W_I32_SUB);
+        i32c(cc, 0);
+        lset(cc, V_E);
+        b_byte(C, W_BR_TABLE);
+        b_u32(C, (unsigned int)(last - k + 1));
+        for (m = 0; m <= last - k; m++) b_u32(C, (unsigned int)m);
+        b_u32(C, 0);
+        b_byte(C, W_END);
+      }
+    }
     cc->pcidx = k;
     cc->depth = 0;
-    cc->exitlabel = (n - 1 - k) + 1;
+    cc->exitlabel = top_label(cc, n) + 1;
     cc->cur = cc->known[k];
     instruction(cc);
+    if ((cc->head[k] >= 0 && cc->loopend[cc->head[k]] == k) || cc->loopend[k] == k)
+      b_byte(C, W_END);  /* the loop */
   }
-  b_byte(C, W_END);  /* loop */
+  b_byte(C, W_END);  /* $dispatch */
   op(cc, W_UNREACHABLE);
   b_byte(C, W_END);  /* $exit */
   lget(cc, V_L);
@@ -2077,7 +2224,7 @@ int ljit_compile (lua_State *L, Proto *p) {
   ** the interpreter's objects come from, and the top is whole again once
   ** everything is freed. */
   {
-    size_t size = (size_t)cc.n * (2 * sizeof(RegSet) + 2 * sizeof(int) + 2);
+    size_t size = (size_t)cc.n * (2 * sizeof(RegSet) + 5 * sizeof(int) + 2) + sizeof(int);
     scratch = (char *)calloc(size < 4096 ? 4096 : size, 1);
   }
   if (scratch == NULL) goto done;
@@ -2085,7 +2232,10 @@ int ljit_compile (lua_State *L, Proto *p) {
   cc.uses = cc.known + cc.n;
   cc.work = (int *)(cc.uses + cc.n);
   cc.stub = cc.work + cc.n;
-  cc.seen = (char *)(cc.stub + cc.n);
+  cc.head = cc.stub + cc.n;
+  cc.loopend = cc.head + cc.n;
+  cc.topcount = cc.loopend + cc.n;
+  cc.seen = (char *)(cc.topcount + cc.n + 1);
   cc.queued = cc.seen + cc.n;
   analyze(&cc);
   if (!compile_body(&cc)) goto done;
