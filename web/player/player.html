@@ -12,24 +12,25 @@
   <canvas id="canvas" tabindex="0" oncontextmenu="event.preventDefault()"></canvas>
 </div>
 
+<!-- The splash screen while the game loads (splash.png and splash.json in
+     the .love), and messages when something goes wrong or the game ends. -->
 <div id="overlay" hidden>
-  <div class="poster" aria-hidden="true"></div>
-  <div class="card">
-    <h1 id="overlay-title">LÖVE</h1>
-    <p id="overlay-by" hidden></p>
-    <button id="play-button" class="play" type="button" aria-label="Play" hidden>
-      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8.5 5.8v12.4c0 .8.9 1.3 1.6.9l9.8-6.2c.6-.4.6-1.4 0-1.8l-9.8-6.2c-.7-.4-1.6.1-1.6.9z"/></svg>
+  <div class="splash">
+    <img id="splash-image" alt="" hidden>
+    <svg id="splash-mark" class="mark" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 21s-7.5-4.6-9.6-9.3C.9 8.2 3 4.5 6.6 4.5c2.1 0 3.6 1.1 4.4 2.6.8-1.5 2.3-2.6 4.4-2.6 3.6 0 5.7 3.7 4.2 7.2C19.5 16.4 12 21 12 21z"/></svg>
+    <p id="splash-caption">Runs on Cupid</p>
+  </div>
+  <div class="foot">
+    <div class="bar"><div id="overlay-progress"></div></div>
+    <div id="overlay-status" role="status"></div>
+    <button id="play-button" class="play" type="button" aria-label="Play again" hidden>
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12a8 8 0 1 0 2.4-5.7M4 4v4.5h4.5"/></svg>
     </button>
-    <div class="loading">
-      <div class="bar"><div id="overlay-progress"></div></div>
-      <div id="overlay-status">Loading…</div>
-    </div>
     <label id="file-picker" hidden>
       Drop a <code>.love</code> file here, or <u>choose one</u>
-      <input type="file" accept=".love,.zip" hidden>
+      <input type="file" accept=".zip,.love" hidden>
     </label>
   </div>
-  <a class="made-with" href="https://github.com/Mostlime12195/cupid" target="_blank" rel="noopener"><span aria-hidden="true">♥</span> Runs on Cupid</a>
 </div>
 
 <div id="dialog-bar" role="dialog" aria-labelledby="dialog-title" hidden>

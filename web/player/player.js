@@ -1,6 +1,8 @@
 // Cupid player.
 //
 // Standalone:  player.html?game=path/to/game.love   (or drop a .love on the page)
+//              Shows the splash while it loads (splash.png in the .love),
+//              then starts the game by itself.
 // Embedded:    <iframe src="player.html?embed=1">, then postMessage
 //              {type: 'run', files: {'main.lua': '...', 'img/a.png': Uint8Array}}
 //              or {type: 'run', love: Uint8Array}.
@@ -18,7 +20,6 @@ const GAME_FILE = '/game.love';
 
 const params = new URLSearchParams(location.search);
 const embedded = params.get('embed') === '1';
-const autoplay = embedded || params.get('autoplay') === '1';
 const scaleMode = params.get('scale') || document.querySelector('meta[name="love-scale"]')?.content || 'fit';
 // ?jit=0 runs all Lua in the interpreter (for comparison or debugging).
 const jitEnabled = params.get('jit') !== '0';
@@ -32,21 +33,27 @@ const progressEl = $('#overlay-progress');
 const playButton = $('#play-button');
 const filePicker = $('#file-picker');
 
-// The start screen's extras, from the page that shows the game: a poster
-// (same site or https only) and who made it.
-{
-  const poster = params.get('poster');
-  if (poster) {
-    try {
-      const u = new URL(poster, location.href);
-      if (u.origin === location.origin || u.protocol === 'https:') overlay.querySelector('.poster').style.setProperty('--poster', `url("${u.href.replace(/"/g, '%22')}")`);
-    } catch { /* not a URL */ }
-  }
-  const by = params.get('by');
-  if (by) {
-    $('#overlay-by').textContent = `by ${by}`;
-    $('#overlay-by').hidden = false;
-  }
+const splashImage = $('#splash-image');
+const splashMark = $('#splash-mark');
+const splashCaption = $('#splash-caption');
+
+// Games start without a click, so browsers hold their sound back until the
+// first one: keep track of the engine's audio and let it play then.
+const audioContexts = new Set();
+for (const name of ['AudioContext', 'webkitAudioContext']) {
+  const Base = window[name];
+  if (!Base) continue;
+  window[name] = class extends Base {
+    constructor(...args) {
+      super(...args);
+      audioContexts.add(this);
+    }
+  };
+}
+for (const type of ['pointerdown', 'keydown', 'touchend']) {
+  window.addEventListener(type, () => {
+    for (const ctx of audioContexts) if (ctx.state === 'suspended') ctx.resume().catch(() => {});
+  }, { capture: true });
 }
 
 document.body.classList.toggle('embed', embedded);
@@ -93,7 +100,7 @@ function output(level, text) {
 
 function showStatus(text, { progress = null, error = false } = {}) {
   overlay.hidden = false;
-  overlay.classList.remove('ready');
+  overlay.classList.remove('leaving');
   statusEl.textContent = text;
   statusEl.classList.toggle('error', error);
   const bar = progressEl.parentElement;
@@ -102,12 +109,22 @@ function showStatus(text, { progress = null, error = false } = {}) {
   progressEl.style.width = typeof progress === 'number' ? `${Math.round(progress * 100)}%` : '';
 }
 
+// The splash fades into the game.
 function hideOverlay() {
-  overlay.hidden = true;
+  overlay.classList.add('leaving');
+  setTimeout(() => {
+    if (overlay.classList.contains('leaving')) overlay.hidden = true;
+  }, 450);
+}
+
+// Errors and the end of the game take the splash's place.
+function showMessage(text, options) {
+  overlay.classList.add('message');
+  showStatus(text, options);
 }
 
 function fail(text) {
-  showStatus(text, { progress: false, error: true });
+  showMessage(text, { progress: false, error: true });
   playButton.hidden = true;
   post({ type: 'error', text });
 }
@@ -205,7 +222,7 @@ function showDownloadProgress() {
   const loaded = downloads.engine[0] + downloads.game[0];
   const total = downloads.engine[1] + downloads.game[1];
   if (total > 0 && loaded < total)
-    showStatus(`Loading… ${(loaded / 1e6).toFixed(1)} / ${(total / 1e6).toFixed(1)} MB`, { progress: loaded / total });
+    showStatus(embedded ? `Loading… ${(loaded / 1e6).toFixed(1)} / ${(total / 1e6).toFixed(1)} MB` : '', { progress: loaded / total });
 }
 
 // Size of a response body as it will be read, or 0 if unknown (compressed
@@ -298,7 +315,7 @@ function writeFiles(M, files) {
 /** game: {love: Uint8Array} | {files: {path: string|Uint8Array}} */
 async function start(game) {
   if (running) return;
-  showStatus('Starting…', { progress: null });
+  if (embedded) showStatus('Starting…', { progress: null });
   const M = await engineReady;
   await savesReady;
 
@@ -350,10 +367,7 @@ async function onQuit(code) {
   await syncSaves(false);
   post({ type: 'quit', code });
   if (!embedded) {
-    showStatus(code ? `The game exited with code ${code}.` : 'The game has quit.', { progress: false });
-    playButton.classList.add('again');
-    playButton.setAttribute('aria-label', 'Play again');
-    playButton.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true" style="fill:none;stroke:currentColor;stroke-width:2.4;stroke-linecap:round;stroke-linejoin:round"><path d="M4 12a8 8 0 1 0 2.4-5.7M4 4v4.5h4.5"/></svg>';
+    showMessage(code ? `The game exited with code ${code}.` : 'The game has quit.', { progress: false });
     playButton.hidden = false;
     playButton.onclick = () => location.reload();
   }
@@ -385,23 +399,99 @@ async function fetchWithProgress(url) {
   return out;
 }
 
-function waitForPlay(game, name) {
-  const title = params.get('title') || name || 'LÖVE';
-  $('#overlay-title').textContent = title;
-  document.title = title;
-  if (autoplay) return start(game);
-  engineReady.then(() => {
-    showStatus('', { progress: false });
-    overlay.classList.add('ready');
-    playButton.hidden = false;
-    playButton.focus();
-  });
-  showStatus('Loading engine…', { progress: null });
-  // The click doubles as the user gesture browsers require for audio.
-  playButton.onclick = () => {
-    playButton.hidden = true;
-    start(game);
-  };
+// ---------------------------------------------------------------------------
+// The splash: splash.png at the top of the .love, if there is one, or
+// Cupid's heart. It stays up while the game loads, and for at least its
+// duration, then fades into the game. splash.json, next to it, can change
+// the rest:
+//
+//   { "image": "splash.png", "background": "#1a1c2c", "duration": 2,
+//     "madeWith": true, "pixel": false }
+
+const SPLASH_DEFAULTS = { image: '', background: '', duration: 1, madeWith: true };
+
+/** One file out of a zip (stored or deflated), or null. */
+async function readZipFile(zip, name) {
+  const view = new DataView(zip.buffer, zip.byteOffset, zip.byteLength);
+  let end = zip.length - 22;
+  while (end >= 0 && view.getUint32(end, true) !== 0x06054b50) end--;
+  if (end < 0) return null;
+  let at = view.getUint32(end + 16, true);
+  const count = view.getUint16(end + 10, true);
+  const decoder = new TextDecoder();
+  for (let i = 0; i < count && view.getUint32(at, true) === 0x02014b50; i++) {
+    const method = view.getUint16(at + 10, true);
+    const size = view.getUint32(at + 20, true);
+    const nameLength = view.getUint16(at + 28, true);
+    const extra = view.getUint16(at + 30, true) + view.getUint16(at + 32, true);
+    const local = view.getUint32(at + 42, true);
+    if (decoder.decode(zip.subarray(at + 46, at + 46 + nameLength)) === name) {
+      const start = local + 30 + view.getUint16(local + 26, true) + view.getUint16(local + 28, true);
+      const data = zip.subarray(start, start + size);
+      if (method === 0) return data;
+      if (method !== 8 || typeof DecompressionStream === 'undefined') return null;
+      const stream = new Blob([data]).stream().pipeThrough(new DecompressionStream('deflate-raw'));
+      return new Uint8Array(await new Response(stream).arrayBuffer());
+    }
+    at += 46 + nameLength + extra;
+  }
+  return null;
+}
+
+/** "#1a1c2c" or [r, g, b] (0 to 1) as a CSS color, or ''. */
+function cssColor(c) {
+  if (typeof c === 'string' && /^#[0-9a-f]{3,8}$/i.test(c)) return c;
+  if (Array.isArray(c) && c.length >= 3 && c.every((n) => typeof n === 'number'))
+    return `rgb(${c.slice(0, 3).map((n) => Math.round(Math.min(1, Math.max(0, n)) * 255)).join(' ')}${c.length > 3 ? ` / ${c[3]}` : ''})`;
+  return '';
+}
+
+/** True for a background light enough to want dark text on it. */
+function isLight(c) {
+  let rgb = Array.isArray(c) ? c.slice(0, 3) : null;
+  if (typeof c === 'string' && /^#[0-9a-f]{6}$/i.test(c)) rgb = [1, 3, 5].map((i) => parseInt(c.slice(i, i + 2), 16) / 255);
+  return !!rgb && 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2] > 0.6;
+}
+
+async function readSplash(game) {
+  if (!game.love) return { ...SPLASH_DEFAULTS };
+  let settings = {};
+  try {
+    const json = await readZipFile(game.love, 'splash.json');
+    if (json) settings = JSON.parse(new TextDecoder().decode(json)) || {};
+  } catch { /* not a zip, or no readable splash.json */ }
+  const splash = { ...SPLASH_DEFAULTS, image: 'splash.png', ...(settings && typeof settings === 'object' ? settings : {}) };
+  if (typeof splash.image === 'string' && splash.image) {
+    const bytes = await readZipFile(game.love, splash.image.replace(/^\/+/, '')).catch(() => null);
+    splash.imageUrl = bytes ? URL.createObjectURL(new Blob([bytes], { type: /\.svg$/i.test(splash.image) ? 'image/svg+xml' : '' })) : '';
+  }
+  return splash;
+}
+
+function showSplash(splash) {
+  const background = cssColor(splash.background);
+  if (background) overlay.style.setProperty('--splash-bg', background);
+  overlay.classList.toggle('light', isLight(splash.background));
+  splashImage.hidden = !splash.imageUrl;
+  if (splash.imageUrl) splashImage.src = splash.imageUrl;
+  splashImage.classList.toggle('pixel', !!splash.pixel);
+  splashMark.hidden = !!splash.imageUrl || !splash.madeWith;
+  splashCaption.hidden = !splash.madeWith;
+  overlay.classList.remove('message');
+  overlay.hidden = false;
+}
+
+async function startWithSplash(game, name) {
+  document.title = params.get('title') || name || 'LÖVE game';
+  if (embedded) return start(game);
+  const splash = await readSplash(game);
+  showSplash(splash);
+  const shown = new Promise((resolve) => setTimeout(resolve, Math.max(0, Math.min(10, Number(splash.duration) || 0)) * 1000));
+  await Promise.all([engineReady, savesReady]);
+  progressEl.classList.remove('indeterminate');
+  progressEl.style.width = '100%';
+  await shown;
+  return start(game);
 }
 
 function acceptDroppedFiles() {
@@ -410,7 +500,7 @@ function acceptDroppedFiles() {
   const load = async (file) => {
     if (!file) return;
     filePicker.hidden = true;
-    waitForPlay({ love: new Uint8Array(await file.arrayBuffer()) }, file.name.replace(/\.(love|zip)$/i, ''));
+    startWithSplash({ love: new Uint8Array(await file.arrayBuffer()) }, file.name.replace(/\.(love|zip)$/i, ''));
   };
   input.addEventListener('change', () => load(input.files[0]));
   window.addEventListener('dragover', (e) => { e.preventDefault(); document.body.classList.add('dragging'); });
@@ -434,12 +524,14 @@ if (embedded) {
   });
   engineReady.then(() => post({ type: 'ready' }));
 } else if (gameUrl) {
-  showStatus('Downloading game…', { progress: 0 });
+  // Cupid's splash until the game's own arrives with the game.
+  showSplash({ ...SPLASH_DEFAULTS });
+  showStatus('', { progress: 0 });
   fetchWithProgress(gameUrl)
-    .then((love) => waitForPlay({ love }, decodeURIComponent(gameUrl.split('/').pop().replace(/\.(love|zip)$/i, ''))))
+    .then((love) => startWithSplash({ love }, decodeURIComponent(gameUrl.split('/').pop().replace(/\.(love|zip)$/i, ''))))
     .catch((e) => fail(`Could not download ${gameUrl}: ${e.message}`));
 } else {
-  showStatus('No game loaded.', { progress: false });
+  showMessage('No game loaded.', { progress: false });
   acceptDroppedFiles();
 }
 

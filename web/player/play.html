@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cupid</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>❤</text></svg>">
+<!--
+  A start page for a game, separate from the game: its picture, name and
+  maker, and Play. Nothing downloads until Play is pressed; then the player
+  (player.html, with its splash) takes the whole page.
+
+    play.html?game=examples/hello.love&title=Hello&by=Ada&poster=hello.png
+-->
+<style>
+  :root {
+    --bg: #0b0c0f;
+    --fg: #eef0f3;
+    --muted: #9a9ea8;
+    --brand: #e74a99;
+    --ease: cubic-bezier(0.2, 0.8, 0.2, 1);
+    color-scheme: dark;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0;
+    height: 100%;
+    background: var(--bg);
+    color: var(--fg);
+    font: 15px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  main {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 18px;
+    min-height: 100%;
+    padding: 24px 16px;
+  }
+  .card {
+    position: relative;
+    display: grid;
+    place-items: center;
+    width: min(100%, 880px, calc((100vh - 160px) * 16 / 9));
+    aspect-ratio: 16 / 9;
+    border-radius: 14px;
+    background: #15161b;
+    overflow: hidden;
+    cursor: pointer;
+  }
+  .card img {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    transition: transform 0.4s var(--ease), filter 0.4s var(--ease);
+  }
+  .card img[hidden] { display: none; }
+  .card:hover img { transform: scale(1.02); filter: brightness(1.06); }
+  .play {
+    position: relative;
+    display: grid;
+    place-items: center;
+    width: 80px;
+    height: 80px;
+    padding: 0 0 0 5px;
+    border: 0;
+    border-radius: 50%;
+    color: #fff;
+    background: var(--brand);
+    box-shadow: 0 8px 28px rgba(0, 0, 0, 0.4);
+    cursor: pointer;
+    transition: transform 0.18s var(--ease), filter 0.18s;
+  }
+  .play svg { width: 32px; height: 32px; fill: currentColor; }
+  .card:hover .play { transform: scale(1.07); filter: brightness(1.08); }
+  .play:active { transform: scale(0.94); }
+  .play:focus-visible { outline: 3px solid rgba(255, 255, 255, 0.85); outline-offset: 4px; }
+  .info { text-align: center; }
+  h1 { margin: 0; font-size: 24px; font-weight: 650; letter-spacing: -0.01em; }
+  #by { margin: 4px 0 0; color: var(--muted); }
+  #by:empty { display: none; }
+  footer { color: var(--muted); font-size: 13px; }
+  footer a { color: inherit; text-decoration: none; }
+  footer a:hover { color: var(--fg); }
+  footer span { color: var(--brand); }
+  /* Once it's playing, the player has the whole page. */
+  iframe { position: fixed; inset: 0; width: 100%; height: 100%; border: 0; background: var(--bg); }
+  body.playing main { display: none; }
+  @media (prefers-reduced-motion: reduce) { .card img, .play { transition: none; } }
+</style>
+</head>
+<body>
+<main>
+  <div class="card" id="card">
+    <img id="poster" alt="" hidden>
+    <button class="play" id="play" type="button" aria-label="Play">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8.5 5.8v12.4c0 .8.9 1.3 1.6.9l9.8-6.2c.6-.4.6-1.4 0-1.8l-9.8-6.2c-.7-.4-1.6.1-1.6.9z"/></svg>
+    </button>
+  </div>
+  <div class="info">
+    <h1 id="title">LÖVE game</h1>
+    <p id="by"></p>
+  </div>
+  <footer><a href="https://github.com/Mostlime12195/cupid" target="_blank" rel="noopener"><span aria-hidden="true">♥</span> Runs on Cupid</a></footer>
+</main>
+<script>
+  const params = new URLSearchParams(location.search);
+  const game = params.get('game') || document.querySelector('meta[name="love-game"]')?.content || '';
+  const title = params.get('title') || decodeURIComponent(game.split('/').pop().replace(/\.(love|zip)$/i, '')) || 'LÖVE game';
+  document.title = title;
+  document.getElementById('title').textContent = title;
+  if (params.get('by')) document.getElementById('by').textContent = `by ${params.get('by')}`;
+
+  // The poster: this site's own pictures, or https ones.
+  const poster = params.get('poster');
+  if (poster) {
+    try {
+      const u = new URL(poster, location.href);
+      if (u.origin === location.origin || u.protocol === 'https:') {
+        const img = document.getElementById('poster');
+        img.src = u.href;
+        img.hidden = false;
+      }
+    } catch { /* not a URL */ }
+  }
+
+  document.getElementById('card').addEventListener('click', () => {
+    const p = new URLSearchParams({ game });
+    for (const key of ['scale', 'pixelated', 'jit']) if (params.has(key)) p.set(key, params.get(key));
+    const frame = document.createElement('iframe');
+    frame.src = `player.html?${p}`;
+    frame.title = title;
+    frame.allow = 'fullscreen; gamepad; autoplay';
+    document.body.append(frame);
+    document.body.classList.add('playing');
+    frame.focus();
+  }, { once: true });
+</script>
+</body>
+</html>

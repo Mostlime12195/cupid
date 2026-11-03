@@ -344,6 +344,21 @@ python3 package.py path/to/game out/ --zip
 Either produces a zip you can upload to itch.io as an HTML game. Serving `.wasm` as `application/wasm`
 lets browsers compile the engine while it downloads; most hosts already do.
 
+While the game loads, the player shows a splash screen (Cupid's heart), then
+fades into the game by itself. To show your own, put a `splash.png` at the
+top of the `.love`. A `splash.json` next to it changes the rest:
+
+```json
+{ "background": "#1a1c2c", "duration": 2, "madeWith": false, "pixel": true }
+```
+
+`duration` is the least time it stays up, in seconds; `madeWith: false` hides
+"Runs on Cupid"; `pixel` keeps a pixel-art picture sharp.
+
+For a start page before anything downloads (a picture, the name, and Play),
+link to `play.html?game=game.love&title=My%20game&by=Me&poster=cover.png`
+instead of `player.html`.
+
 Player URL options:
 
 | Option | Effect |
