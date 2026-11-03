@@ -254,6 +254,8 @@ typedef struct Proto {
      0 if not compiled, -1 if it can't be. */
   int jit;
   int jitcount;
+  int jitdeopts;  /* times its compiled code deopted */
+  lu_byte jitnotes;  /* has notes in ljit.inc's feedback table */
 } Proto;
 
 

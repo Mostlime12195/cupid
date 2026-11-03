@@ -384,8 +384,10 @@ static void Arith (lua_State *L, StkId ra, const TValue *rb,
           lua_Number nb = nvalue(rb), nc = nvalue(rc); \
           setnvalue(ra, op(nb, nc)); \
         } \
-        else \
+        else { \
+          ljit_feedback(cl->p, pc - 1); \
           Protect(Arith(L, ra, rb, rc, tm)); \
+        } \
       }
 
 
@@ -399,6 +401,9 @@ void luaV_execute (lua_State *L, int nexeccalls) {
   StkId base;
   TValue *k;
   const Instruction *pc;
+#if LJIT_ENABLED
+  int jitskip = 0;  /* interpret L->ci without its compiled code */
+#endif
  reentry:  /* entry point */
   lua_assert(isLua(L->ci));
   pc = L->savedpc;
@@ -406,7 +411,7 @@ void luaV_execute (lua_State *L, int nexeccalls) {
   base = L->base;
   k = cl->p->k;
 #if LJIT_ENABLED
-  if (ljit_enabled && !(L->hookmask & (LUA_MASKLINE | LUA_MASKCOUNT))) {
+  if (ljit_enabled && !jitskip && !(L->hookmask & (LUA_MASKLINE | LUA_MASKCOUNT))) {
     Proto *jp = cl->p;
     if (jp->jit > 0 || (jp->jit == 0 && ++jp->jitcount >= ljit_threshold &&
                         ljit_compile(L, jp))) {
@@ -424,11 +429,16 @@ void luaV_execute (lua_State *L, int nexeccalls) {
           if (--nexeccalls == 0) return;
           goto reentry;
         case LJIT_YIELD: return;
+        case LJIT_DEOPT:  /* interpret L->ci from here, this once */
+          ljit_deopt(L);
+          jitskip = 1;
+          goto reentry;
         default:  /* LJIT_INTERP: a hook was set; interpret L->ci from here */
           goto reentry;
       }
     }
   }
+  jitskip = 0;
 #endif
   /* main loop of interpreter */
   for (;;) {
@@ -547,6 +557,7 @@ void luaV_execute (lua_State *L, int nexeccalls) {
           setnvalue(ra, luai_numunm(nb));
         }
         else {
+          ljit_feedback(cl->p, pc - 1);
           Protect(Arith(L, ra, rb, rb, TM_UNM));
         }
         continue;
@@ -599,6 +610,8 @@ void luaV_execute (lua_State *L, int nexeccalls) {
         continue;
       }
       case OP_LT: {
+        if (!ttisnumber(RKB(i)) || !ttisnumber(RKC(i)))
+          ljit_feedback(cl->p, pc - 1);
         Protect(
           if (luaV_lessthan(L, RKB(i), RKC(i)) == GETARG_A(i))
             dojump(L, pc, GETARG_sBx(*pc));
@@ -607,6 +620,8 @@ void luaV_execute (lua_State *L, int nexeccalls) {
         continue;
       }
       case OP_LE: {
+        if (!ttisnumber(RKB(i)) || !ttisnumber(RKC(i)))
+          ljit_feedback(cl->p, pc - 1);
         Protect(
           if (lessequal(L, RKB(i), RKC(i)) == GETARG_A(i))
             dojump(L, pc, GETARG_sBx(*pc));

@@ -43,7 +43,7 @@ extern void ljit_release (int index);
 
 /* Functions compiled / that failed to compile, bytes of wasm generated and
 ** time spent compiling (ours and the browser's), for tests and diagnostics. */
-static int ljit_ncompiled = 0, ljit_nfailed = 0;
+static int ljit_ncompiled = 0, ljit_nfailed = 0, ljit_ndeopts = 0;
 static double ljit_nbytes = 0, ljit_ms = 0;
 
 EMSCRIPTEN_KEEPALIVE double ljit_stats (int what) {
@@ -51,7 +51,8 @@ EMSCRIPTEN_KEEPALIVE double ljit_stats (int what) {
     case 0: return ljit_ncompiled;
     case 1: return ljit_nfailed;
     case 2: return ljit_nbytes;
-    default: return ljit_ms;
+    case 3: return ljit_ms;
+    default: return ljit_ndeopts;
   }
 }
 
@@ -526,9 +527,12 @@ enum {
   W_VOID = 0x40, W_TYPE_I32 = 0x7f, W_TYPE_F64 = 0x7c
 };
 
-/* Locals of the compiled function. Param 0 is L. */
+/* Locals of the compiled function. Param 0 is L. They are followed by one
+** f64 local per Lua register, V_DREG(r), that holds the register's number
+** while it is known to be one (see "Speculation" below). */
 enum { V_L = 0, V_BASE, V_IDX, V_T, V_R, V_TAB, V_S, V_D1, V_D2 };
 #define NUM_I32_LOCALS 6  /* V_BASE .. V_S */
+#define V_DREG(r) (V_D2 + 1 + (r))
 
 /* Offsets in TValue / lua_State used by the generated code. */
 #define TV_SIZE   ((int)sizeof(TValue))
@@ -556,6 +560,45 @@ enum { V_L = 0, V_BASE, V_IDX, V_T, V_R, V_TAB, V_S, V_D1, V_D2 };
 /* Node values are found by their node address. */
 typedef char ljit_check_node_layout[offsetof(Node, i_val) == 0 ? 1 : -1];
 
+/* A set of Lua registers. */
+#define LJIT_MAXREGS 256
+typedef struct RegSet { unsigned int w[LJIT_MAXREGS / 32]; } RegSet;
+
+static int rs_has (const RegSet *s, int r) {
+  return r >= 0 && r < LJIT_MAXREGS && ((s->w[r >> 5] >> (r & 31)) & 1);
+}
+static void rs_add (RegSet *s, int r) {
+  if (r >= 0 && r < LJIT_MAXREGS) s->w[r >> 5] |= 1u << (r & 31);
+}
+static void rs_del (RegSet *s, int r) {
+  if (r >= 0 && r < LJIT_MAXREGS) s->w[r >> 5] &= ~(1u << (r & 31));
+}
+static void rs_delfrom (RegSet *s, int r) {
+  for (; r < LJIT_MAXREGS; r++) rs_del(s, r);
+}
+static int rs_empty (const RegSet *s) {
+  int j;
+  for (j = 0; j < LJIT_MAXREGS / 32; j++) if (s->w[j]) return 0;
+  return 1;
+}
+/* d &= s, d |= s: return whether d changed */
+static int rs_and (RegSet *d, const RegSet *s) {
+  int j, changed = 0;
+  for (j = 0; j < LJIT_MAXREGS / 32; j++) {
+    unsigned int w = d->w[j] & s->w[j];
+    if (w != d->w[j]) { d->w[j] = w; changed = 1; }
+  }
+  return changed;
+}
+static int rs_or (RegSet *d, const RegSet *s) {
+  int j, changed = 0;
+  for (j = 0; j < LJIT_MAXREGS / 32; j++) {
+    unsigned int w = d->w[j] | s->w[j];
+    if (w != d->w[j]) { d->w[j] = w; changed = 1; }
+  }
+  return changed;
+}
+
 typedef struct Compiler {
   Buf code;
   Proto *p;
@@ -563,6 +606,15 @@ typedef struct Compiler {
   int pcidx;  /* instruction being compiled */
   int depth;  /* blocks opened inside the current instruction */
   TString *indexname;  /* "__index" */
+  /* Speculation (see below) */
+  int spec;        /* speculate on types (else `known` is all empty) */
+  RegSet *known;   /* per instruction: registers known to be numbers */
+  RegSet *uses;    /* per instruction: registers used as numbers ahead */
+  int *work;       /* the analysis's worklist */
+  int *stub;       /* per instruction: entry stub number, or -1 */
+  char *seen, *queued;
+  RegSet cur;      /* the same, as the current instruction's code goes */
+  int exitlabel;   /* label of the deopt exit, at depth 0 */
 } Compiler;
 
 #define C (&cc->code)
@@ -602,11 +654,18 @@ static int isk_number (Compiler *cc, int rk) {
   return ISK(rk) && ttisnumber(&cc->p->k[INDEXK(rk)]);
 }
 
+/* Is RK operand rk a register known to hold a number (in its V_DREG)? */
+static int known (Compiler *cc, int rk) {
+  return !ISK(rk) && rs_has(&cc->cur, rk);
+}
+
 /* Pushes the f64 value of RK operand rk (must be a register or a numeric
 ** constant). */
 static void load_num (Compiler *cc, int rk) {
   if (ISK(rk))
     f64c(cc, nvalue(&cc->p->k[INDEXK(rk)]));
+  else if (known(cc, rk))
+    lget(cc, V_DREG(rk));
   else {
     lget(cc, V_BASE);
     mem(cc, W_F64_LOAD, 3, reg(rk) + TV_VALUE);
@@ -621,11 +680,12 @@ static void not_number (Compiler *cc, int r) {
   op(cc, W_I32_NE);
 }
 
-/* Pushes 1 if any of the RK operands isn't a number (constants are known). */
+/* Pushes 1 if any of the RK operands isn't a number (constants and known
+** registers are numbers). Returns 0 if nothing was pushed. */
 static int push_not_numbers (Compiler *cc, int b, int c) {
   int pushed = 0;
-  if (!ISK(b)) { not_number(cc, b); pushed++; }
-  if (!ISK(c)) {
+  if (!ISK(b) && !known(cc, b)) { not_number(cc, b); pushed++; }
+  if (!ISK(c) && !known(cc, c)) {
     not_number(cc, c);
     if (pushed) op(cc, W_I32_OR);
     pushed++;
@@ -666,6 +726,69 @@ static void call_helper (Compiler *cc, int h) {
   b_u32(C, h);
 }
 
+/* Leaves the compiled code to interpret from instruction `idx`
+** (LJIT_DEOPT): a speculation failed. The Lua stack is always up to date,
+** so nothing else needs to be written back. */
+static void deopt (Compiler *cc, int idx) {
+  i32c(cc, idx);
+  lset(cc, V_IDX);
+  b_byte(C, W_BR);
+  b_u32(C, (unsigned int)(cc->depth + cc->exitlabel));
+}
+
+/* Pops a number into register r: into its f64 local and the Lua stack,
+** whose type tag is already right if r was known to be a number. */
+static void def_num (Compiler *cc, int r) {
+  lset(cc, V_DREG(r));
+  lget(cc, V_BASE);
+  lget(cc, V_DREG(r));
+  mem(cc, W_F64_STORE, 3, reg(r) + TV_VALUE);
+  if (!rs_has(&cc->cur, r)) {
+    lget(cc, V_BASE);
+    i32c(cc, LUA_TNUMBER);
+    mem(cc, W_I32_STORE, 2, reg(r) + TV_TT);
+  }
+  if (cc->spec) rs_add(&cc->cur, r);
+}
+
+/* Makes register r known to be a number, leaving the compiled code at
+** instruction `idx` if it isn't one. */
+static void guard (Compiler *cc, int r, int idx) {
+  if (rs_has(&cc->cur, r)) return;
+  not_number(cc, r);
+  block(cc, W_IF, W_VOID);
+  deopt(cc, idx);
+  end(cc);
+  lget(cc, V_BASE);
+  mem(cc, W_F64_LOAD, 3, reg(r) + TV_VALUE);
+  lset(cc, V_DREG(r));
+  rs_add(&cc->cur, r);
+}
+
+/* After a helper call, which may have run any Lua code (a metamethod, a
+** hook, a function that changes our locals with debug.setlocal), before
+** going on to instruction s: reloads the registers s expects to be known
+** numbers, checking that they still are. */
+static void reestablish (Compiler *cc, int s) {
+  RegSet saved = cc->cur;
+  int r;
+  if (s < 0 || s >= cc->n || rs_empty(&cc->known[s])) return;
+  memset(&cc->cur, 0, sizeof(cc->cur));
+  for (r = 0; r < LJIT_MAXREGS; r++)
+    if (rs_has(&cc->known[s], r)) guard(cc, r, s);
+  cc->cur = saved;
+}
+
+/* Instruction k's single successor (for helpers that don't jump). */
+static int next_insn (Compiler *cc, int k);
+
+/* The generic helper for the current instruction. */
+static void helper_exec (Compiler *cc) {
+  call_helper(cc, H_EXEC);
+  reload_base(cc);
+  reestablish(cc, next_insn(cc, cc->pcidx));
+}
+
 /* Continues execution at instruction t. */
 static void jump (Compiler *cc, int t) {
   int k = cc->pcidx;
@@ -688,7 +811,9 @@ static void jump (Compiler *cc, int t) {
     i32c(cc, LJIT_INTERP);
     op(cc, W_RETURN);
     b_byte(C, W_END);
-    i32c(cc, t);
+    /* Registers known at t are known here too: enter t past the stub that
+    ** would check and load them (see compile_body). */
+    i32c(cc, rs_empty(&cc->known[t]) ? t : cc->n + t);
     lset(cc, V_IDX);
     b_byte(C, W_BR);
     b_u32(C, (unsigned int)(cc->depth + (cc->n - 1 - k)));
@@ -720,18 +845,10 @@ static void return_if_nonzero (Compiler *cc) {
   b_byte(C, W_END);
 }
 
-static void arith (Compiler *cc, Instruction i, int wop) {
-  int a = GETARG_A(i), b = GETARG_B(i), c = GETARG_C(i);
-  if ((ISK(b) && !isk_number(cc, b)) || (ISK(c) && !isk_number(cc, c))) {
-    call_helper(cc, H_EXEC);
-    reload_base(cc);
-    return;
-  }
-  block(cc, W_BLOCK, W_VOID);  /* done */
-  block(cc, W_BLOCK, W_VOID);  /* slow */
-  if (push_not_numbers(cc, b, c)) {
-    b_byte(C, W_BR_IF); b_u32(C, 0);
-  }
+static int speculative (Compiler *cc, int k);
+
+/* Pushes the result of numeric operation wop on RK operands b and c. */
+static void num_op (Compiler *cc, int wop, int b, int c) {
   if (wop == W_F64_FLOOR) {
     /* luai_nummod: a - floor(a/b)*b */
     load_num(cc, b); lset(cc, V_D1);
@@ -747,12 +864,34 @@ static void arith (Compiler *cc, Instruction i, int wop) {
     load_num(cc, c);
     op(cc, wop);
   }
+}
+
+static void arith (Compiler *cc, Instruction i, int wop) {
+  int a = GETARG_A(i), b = GETARG_B(i), c = GETARG_C(i);
+  if ((ISK(b) && !isk_number(cc, b)) || (ISK(c) && !isk_number(cc, c))) {
+    helper_exec(cc);
+    return;
+  }
+  if (speculative(cc, cc->pcidx)) {
+    /* operands that aren't numbers leave the compiled code */
+    if (!ISK(b)) guard(cc, b, cc->pcidx);
+    if (!ISK(c)) guard(cc, c, cc->pcidx);
+    num_op(cc, wop, b, c);
+    def_num(cc, a);
+    return;
+  }
+  block(cc, W_BLOCK, W_VOID);  /* done */
+  block(cc, W_BLOCK, W_VOID);  /* slow */
+  if (push_not_numbers(cc, b, c)) {
+    b_byte(C, W_BR_IF); b_u32(C, 0);
+  }
+  num_op(cc, wop, b, c);
   lset(cc, V_D1);
   store_num(cc, a, V_D1);
+  rs_del(&cc->cur, a);
   b_byte(C, W_BR); b_u32(C, 1);
   end(cc);
-  call_helper(cc, H_EXEC);
-  reload_base(cc);
+  helper_exec(cc);
   end(cc);
 }
 
@@ -790,7 +929,24 @@ static void compare (Compiler *cc, Instruction i, int o) {
   int next = cc->pcidx + 1;
   int target = next + 1 + GETARG_sBx(cc->p->code[next]);
   int fast = !(ISK(b) && !isk_number(cc, b)) && !(ISK(c) && !isk_number(cc, c));
+  int wop = o == OP_EQ ? W_F64_EQ : o == OP_LT ? W_F64_LT : W_F64_LE;
   if (o == OP_EQ && compare_const(cc, b, c)) {
+    i32c(cc, a);
+    op(cc, W_I32_EQ);
+    block(cc, W_IF, W_VOID);
+    jump(cc, target);
+    end(cc);
+    jump(cc, cc->pcidx + 2);
+    return;
+  }
+  if (fast && ((o != OP_EQ && speculative(cc, cc->pcidx)) ||
+               ((ISK(b) || known(cc, b)) && (ISK(c) || known(cc, c))))) {
+    /* numbers (known, or else leave the compiled code) */
+    if (!ISK(b)) guard(cc, b, cc->pcidx);
+    if (!ISK(c)) guard(cc, c, cc->pcidx);
+    load_num(cc, b);
+    load_num(cc, c);
+    op(cc, wop);
     i32c(cc, a);
     op(cc, W_I32_EQ);
     block(cc, W_IF, W_VOID);
@@ -807,7 +963,7 @@ static void compare (Compiler *cc, Instruction i, int o) {
     }
     load_num(cc, b);
     load_num(cc, c);
-    op(cc, o == OP_EQ ? W_F64_EQ : o == OP_LT ? W_F64_LT : W_F64_LE);
+    op(cc, wop);
     lset(cc, V_R);
     b_byte(C, W_BR); b_u32(C, 1);
     end(cc);
@@ -815,6 +971,18 @@ static void compare (Compiler *cc, Instruction i, int o) {
   call_helper(cc, H_COMPARE);
   lset(cc, V_R);
   reload_base(cc);
+  if (!rs_empty(&cc->known[target]) || !rs_empty(&cc->known[cc->pcidx + 2])) {
+    /* (the helper may have run a metamethod) */
+    lget(cc, V_R);
+    i32c(cc, a);
+    op(cc, W_I32_EQ);
+    block(cc, W_IF, W_VOID);
+    reestablish(cc, target);
+    jump(cc, target);
+    end(cc);
+    reestablish(cc, cc->pcidx + 2);
+    jump(cc, cc->pcidx + 2);
+  }
   if (fast) end(cc);
   lget(cc, V_R);
   i32c(cc, a);
@@ -936,7 +1104,7 @@ static void lookup (Compiler *cc, int rk, int slow) {
   if (key_kind(cc, rk) == KEY_STR)
     lookup_str(cc, rawtsvalue(&cc->p->k[INDEXK(rk)]));
   else {
-    if (!ISK(rk)) {
+    if (!ISK(rk) && !known(cc, rk)) {
       not_number(cc, rk);
       br_if_out(cc, slow);
     }
@@ -976,7 +1144,6 @@ static void copy_from_slot (Compiler *cc, int a) {
 ** deeper chain) goes to the helper. */
 static void get_table (Compiler *cc, int a, int table, int key, int self) {
   int strkey = key_kind(cc, key) == KEY_STR;
-  int level;
   block(cc, W_BLOCK, W_VOID);  /* done */
   block(cc, W_BLOCK, W_VOID);  /* slow */
   if (table < 0) load_env(cc); else load_table_reg(cc, table, 0);
@@ -996,55 +1163,59 @@ static void get_table (Compiler *cc, int a, int table, int key, int self) {
     copy_from_slot(cc, a);
     b_byte(C, W_BR); b_u32(C, 1);
     end(cc);
-    call_helper(cc, H_EXEC);
-    reload_base(cc);
+    helper_exec(cc);
     end(cc);
     return;
   }
-  for (level = 0; level < LJIT_INDEX_LEVELS; level++) {
-    /* V_TAB: the table to look in; depth: done is 2 blocks out of miss */
-    block(cc, W_BLOCK, W_VOID);  /* miss */
-    lookup_str(cc, rawtsvalue(&cc->p->k[INDEXK(key)]));
-    lget(cc, V_S); op(cc, W_I32_EQZ);
-    br_if_out(cc, 0);  /* absent */
-    lget(cc, V_S); mem(cc, W_I32_LOAD, 2, TV_TT);
-    op(cc, W_I32_EQZ);
-    br_if_out(cc, 0);  /* nil */
-    copy_from_slot(cc, a);
-    b_byte(C, W_BR); b_u32(C, 2);  /* done */
-    end(cc);
-    /* absent: V_TAB = metatable, or the result is nil */
-    lget(cc, V_TAB); mem(cc, W_I32_LOAD, 2, T_METATABLE);
-    ltee(cc, V_TAB);
-    op(cc, W_I32_EQZ);
-    block(cc, W_IF, W_VOID);
-    set_nil(cc, a);
-    b_byte(C, W_BR); b_u32(C, 2);  /* done */
-    end(cc);
-    /* V_S = metatable.__index (the metatable's flags only cache absence) */
-    lookup_str(cc, cc->indexname);
-    lget(cc, V_S); op(cc, W_I32_EQZ);
-    block(cc, W_IF, W_TYPE_I32);
-    i32c(cc, 1);
-    b_byte(C, W_ELSE);
-    lget(cc, V_S); mem(cc, W_I32_LOAD, 2, TV_TT);
-    op(cc, W_I32_EQZ);
-    end(cc);
-    block(cc, W_IF, W_VOID);
-    set_nil(cc, a);  /* no __index */
-    b_byte(C, W_BR); b_u32(C, 2);  /* done */
-    end(cc);
-    /* an __index table is looked in next; anything else is the helper's */
-    lget(cc, V_S); mem(cc, W_I32_LOAD, 2, TV_TT);
-    i32c(cc, LUA_TTABLE); op(cc, W_I32_NE);
-    br_if_out(cc, 0);  /* slow */
-    lget(cc, V_S); mem(cc, W_I32_LOAD, 2, TV_VALUE);
-    lset(cc, V_TAB);
-  }
+  /* A loop (rather than unrolled, which makes much bigger code) over the
+  ** chain of tables, V_R counting the levels left. */
+  i32c(cc, LJIT_INDEX_LEVELS);
+  lset(cc, V_R);
+  block(cc, W_LOOP, W_VOID);  /* labels: loop 0, slow 1, done 2 */
+  block(cc, W_BLOCK, W_VOID);  /* miss */
+  lookup_str(cc, rawtsvalue(&cc->p->k[INDEXK(key)]));
+  lget(cc, V_S); op(cc, W_I32_EQZ);
+  br_if_out(cc, 0);  /* absent */
+  lget(cc, V_S); mem(cc, W_I32_LOAD, 2, TV_TT);
+  op(cc, W_I32_EQZ);
+  br_if_out(cc, 0);  /* nil */
+  copy_from_slot(cc, a);
+  b_byte(C, W_BR); b_u32(C, 3);  /* done */
+  end(cc);
+  /* absent: V_TAB = metatable, or the result is nil */
+  lget(cc, V_TAB); mem(cc, W_I32_LOAD, 2, T_METATABLE);
+  ltee(cc, V_TAB);
+  op(cc, W_I32_EQZ);
+  block(cc, W_IF, W_VOID);
+  set_nil(cc, a);
+  b_byte(C, W_BR); b_u32(C, 3);  /* done */
+  end(cc);
+  /* V_S = metatable.__index (the metatable's flags only cache absence) */
+  lookup_str(cc, cc->indexname);
+  lget(cc, V_S); op(cc, W_I32_EQZ);
+  block(cc, W_IF, W_TYPE_I32);
+  i32c(cc, 1);
+  b_byte(C, W_ELSE);
+  lget(cc, V_S); mem(cc, W_I32_LOAD, 2, TV_TT);
+  op(cc, W_I32_EQZ);
+  end(cc);
+  block(cc, W_IF, W_VOID);
+  set_nil(cc, a);  /* no __index */
+  b_byte(C, W_BR); b_u32(C, 3);  /* done */
+  end(cc);
+  /* an __index table is looked in next; anything else is the helper's */
+  lget(cc, V_S); mem(cc, W_I32_LOAD, 2, TV_TT);
+  i32c(cc, LUA_TTABLE); op(cc, W_I32_NE);
+  br_if_out(cc, 1);  /* slow */
+  lget(cc, V_S); mem(cc, W_I32_LOAD, 2, TV_VALUE);
+  lset(cc, V_TAB);
+  lget(cc, V_R); i32c(cc, 1); op(cc, W_I32_SUB);
+  ltee(cc, V_R);
+  br_if_out(cc, 0);  /* next level */
+  end(cc);  /* loop */
   b_byte(C, W_BR); b_u32(C, 0);  /* slow: a longer chain */
   end(cc);
-  call_helper(cc, H_EXEC);
-  reload_base(cc);
+  helper_exec(cc);
   end(cc);
 }
 
@@ -1097,13 +1268,267 @@ static void set_table (Compiler *cc, int table, int key, int value) {
   lget(cc, V_TAB); i32c(cc, 0); mem(cc, W_I32_STORE8, 0, T_FLAGS);
   b_byte(C, W_BR); b_u32(C, 1);
   end(cc);
-  call_helper(cc, H_EXEC);
-  reload_base(cc);
+  helper_exec(cc);
   end(cc);
 }
 
 static int inline_key (Compiler *cc, int rk) {
   return key_kind(cc, rk) != KEY_NONE;
+}
+
+/* ------------------------------------------------------------------------
+** Speculation
+**
+** Like V8's optimizing tiers, compiled code assumes what the interpreter has
+** seen so far: arithmetic and comparisons whose operands have always been
+** numbers (no feedback from the interpreter, see ljit_note, or from an
+** earlier deopt says otherwise) check their register operands and, if one
+** isn't a number, leave the compiled code at that instruction (LJIT_DEOPT)
+** for the interpreter, which runs it the slow way, instead of calling a
+** helper. Past the check, and past their results, those registers are known
+** numbers: their values are kept in f64 locals (V_DREG) and used from there
+** with no more loads or type checks, across instructions and loop
+** iterations.
+**
+** `known[k]` is the set of registers known to be numbers when instruction k
+** starts. The Lua stack is always written too (so exits, errors, hooks and
+** the GC see the right values, and leaving the compiled code needs nothing
+** written back), which keeps the invariant simple: a register in known[k]
+** holds a number on the Lua stack and the same number in its local. Every
+** way into k must make that true:
+**  - instructions inline keep the locals of the registers they write;
+**  - after a helper call (which may run any Lua code: a metamethod, a hook
+**    using debug.setlocal) the registers known at the next instruction are
+**    loaded again and checked (`reestablish`);
+**  - entering the function at k (after a call returned through the
+**    interpreter, a coroutine resumed, the interpreter's loop got hot) goes
+**    through a stub that loads and checks known[k] (compile_body).
+** Any choice of known sets is therefore correct; the analysis below picks
+** registers that are numbers on every path and are about to be used as
+** numbers. A failed check deopts: the interpreter takes over, the site is
+** noted, and the function is compiled again later with what was learned
+** (ljit_deopt).
+** --------------------------------------------------------------------- */
+
+/* A deopt discards the code; after this many, a function is compiled
+** without speculation. */
+#define LJIT_MAX_DEOPTS 5
+
+/* Notes from ljit_note, in a fixed table rather than allocated per
+** function so they don't change the addresses the interpreter's own objects
+** get (tostring of tables, the order of pairs over tables with table
+** keys): the same whether the JIT is on or not. Losing a note costs a
+** deopt at worst. */
+#define LJIT_NOTES 4096
+#define LJIT_NOTE_PROBES 8
+static struct { const Proto *p; int k; } ljit_notes[LJIT_NOTES];
+
+static unsigned int ljit_notehash (const Proto *p, int k) {
+  return (((unsigned int)(size_t)p >> 3) * 2654435761u + (unsigned int)k * 40503u) &
+         (LJIT_NOTES - 1);
+}
+
+static int ljit_noted (const Proto *p, int k) {
+  unsigned int h = ljit_notehash(p, k);
+  int j;
+  for (j = 0; j < LJIT_NOTE_PROBES; j++) {
+    unsigned int slot = (h + j) & (LJIT_NOTES - 1);
+    if (ljit_notes[slot].p == p && ljit_notes[slot].k == k) return 1;
+    if (ljit_notes[slot].p == NULL) return 0;
+  }
+  return 0;
+}
+
+/* Does instruction k speculate that its operands are numbers? */
+static int speculative (Compiler *cc, int k) {
+  Proto *p = cc->p;
+  Instruction i = p->code[k];
+  int b = GETARG_B(i), c = GETARG_C(i);
+  if (!cc->spec || (p->jitnotes && ljit_noted(p, k))) return 0;
+  switch (GET_OPCODE(i)) {
+    case OP_ADD: case OP_SUB: case OP_MUL: case OP_DIV: case OP_MOD:
+    case OP_LT: case OP_LE:
+      return !(ISK(b) && !isk_number(cc, b)) && !(ISK(c) && !isk_number(cc, c));
+    case OP_UNM:
+      return 1;
+    default:
+      return 0;
+  }
+}
+
+/* Successors of instruction k in the compiled code (not counting the
+** dispatcher); for OP_FORLOOP the loop's exit comes first. */
+static int successors (Compiler *cc, int k, int *t) {
+  Proto *p = cc->p;
+  Instruction i = p->code[k];
+  int m;
+  switch (GET_OPCODE(i)) {
+    case OP_JMP: t[0] = k + 1 + GETARG_sBx(i); m = 1; break;
+    case OP_EQ: case OP_LT: case OP_LE: case OP_TEST: case OP_TESTSET:
+    case OP_TFORLOOP:
+      t[0] = k + 2; t[1] = k + 2 + GETARG_sBx(p->code[k + 1]); m = 2; break;
+    case OP_LOADBOOL: t[0] = GETARG_C(i) ? k + 2 : k + 1; m = 1; break;
+    case OP_FORLOOP: t[0] = k + 1; t[1] = k + 1 + GETARG_sBx(i); m = 2; break;
+    case OP_FORPREP: t[0] = k + 1 + GETARG_sBx(i); m = 1; break;
+    case OP_RETURN: m = 0; break;
+    case OP_CLOSURE: t[0] = k + 1 + p->p[GETARG_Bx(i)]->nups; m = 1; break;
+    case OP_SETLIST: t[0] = GETARG_C(i) == 0 ? k + 2 : k + 1; m = 1; break;
+    default: t[0] = k + 1; m = 1; break;
+  }
+  {
+    int j, valid = 0;
+    for (j = 0; j < m; j++) if (t[j] >= 0 && t[j] < cc->n) t[valid++] = t[j];
+    return valid;
+  }
+}
+
+static int next_insn (Compiler *cc, int k) {
+  int t[2];
+  return successors(cc, k, t) == 1 ? t[0] : -1;
+}
+
+/* Registers used as numbers ahead (backward: from the uses after k to
+** the uses at k): s is the set after k on entry, before k on return. */
+static void uses_transfer (Compiler *cc, int k, RegSet *s) {
+  Instruction i = cc->p->code[k];
+  int a = GETARG_A(i), b = GETARG_B(i), c = GETARG_C(i);
+  switch (GET_OPCODE(i)) {
+    case OP_MOVE:  /* a number moved to a register used as one */
+      if (rs_has(s, a)) { rs_del(s, a); rs_add(s, b); }
+      break;
+    case OP_LOADK: case OP_LOADBOOL: case OP_GETUPVAL: case OP_GETGLOBAL:
+    case OP_GETTABLE: case OP_NEWTABLE: case OP_NOT: case OP_LEN:
+    case OP_CLOSURE:
+      rs_del(s, a);
+      break;
+    case OP_ADD: case OP_SUB: case OP_MUL: case OP_DIV: case OP_MOD:
+    case OP_POW:
+      rs_del(s, a);
+      if (!ISK(b)) rs_add(s, b);
+      if (!ISK(c)) rs_add(s, c);
+      break;
+    case OP_UNM:
+      rs_del(s, a);
+      rs_add(s, b);
+      break;
+    case OP_EQ: case OP_LT: case OP_LE:
+      if (!ISK(b)) rs_add(s, b);
+      if (!ISK(c)) rs_add(s, c);
+      break;
+    /* (Not OP_FORLOOP's own registers: keeping the loop's index, limit
+    ** and step in locals measured slower than loading them, as the
+    ** interpreter does, probably because they then stay live, in
+    ** registers or spilled, across every inner loop and call.) */
+    default:
+      break;
+  }
+}
+
+/* Registers known to be numbers (forward): s is the set before k on entry,
+** after it (along the edge to successor number `edge`) on return. Writes
+** that may not be numbers remove registers; numeric results add them. */
+static void known_transfer (Compiler *cc, int k, RegSet *s, int edge,
+                            const RegSet *uses) {
+  Instruction i = cc->p->code[k];
+  int a = GETARG_A(i), b = GETARG_B(i), c = GETARG_C(i);
+  int r;
+  switch (GET_OPCODE(i)) {
+    case OP_MOVE:
+      if (rs_has(s, b) && rs_has(uses, b)) rs_add(s, a);
+      else rs_del(s, a);
+      break;
+    case OP_LOADK:
+      if (ttisnumber(cc->p->k + GETARG_Bx(i))) rs_add(s, a);
+      else rs_del(s, a);
+      break;
+    case OP_LOADNIL:
+      for (r = a; r <= b; r++) rs_del(s, r);
+      break;
+    case OP_CONCAT:
+      for (r = b; r <= c; r++) rs_del(s, r);
+      rs_del(s, a);
+      break;
+    case OP_SELF:
+      rs_del(s, a); rs_del(s, a + 1);
+      break;
+    case OP_ADD: case OP_SUB: case OP_MUL: case OP_DIV: case OP_MOD:
+    case OP_UNM:
+      if (speculative(cc, k)) {
+        if (!ISK(b)) rs_add(s, b);
+        if (GET_OPCODE(i) != OP_UNM && !ISK(c)) rs_add(s, c);
+        rs_add(s, a);
+      }
+      else rs_del(s, a);
+      break;
+    case OP_LT: case OP_LE:
+      if (speculative(cc, k)) {
+        if (!ISK(b)) rs_add(s, b);
+        if (!ISK(c)) rs_add(s, c);
+      }
+      break;
+    case OP_CALL: case OP_TAILCALL: case OP_VARARG: case OP_TFORLOOP:
+      rs_delfrom(s, a);
+      break;
+    case OP_FORPREP:  /* forprep made them numbers (or raised an error) */
+      rs_add(s, a); rs_add(s, a + 1); rs_add(s, a + 2);
+      break;
+    case OP_FORLOOP:  /* written only when the loop goes on */
+      if (edge == 1) { rs_add(s, a); rs_add(s, a + 3); }
+      break;
+    case OP_SETTABLE: case OP_SETGLOBAL: case OP_SETUPVAL: case OP_SETLIST:
+    case OP_JMP: case OP_TEST: case OP_EQ: case OP_CLOSE: case OP_RETURN:
+      break;
+    default:  /* everything else writes register A, at most */
+      rs_del(s, a);
+      break;
+  }
+}
+
+/* Fills cc->known. */
+static void analyze (Compiler *cc) {
+  int n = cc->n, k, j, changed;
+  int t[2], ns;
+  RegSet *uses = cc->uses;
+  char *seen = cc->seen, *queued = cc->queued;
+  int *work = cc->work;
+  int nwork = 0;
+  if (cc->spec) {
+    /* registers used as numbers ahead, to the fixpoint */
+    do {
+      changed = 0;
+      for (k = n - 1; k >= 0; k--) {
+        RegSet s;
+        memset(&s, 0, sizeof(s));
+        ns = successors(cc, k, t);
+        for (j = 0; j < ns; j++) rs_or(&s, &uses[t[j]]);
+        uses_transfer(cc, k, &s);
+        if (rs_or(&uses[k], &s)) changed = 1;
+      }
+    } while (changed);
+    /* registers known to be numbers: nothing at the start, the
+    ** intersection over every way in, to the fixpoint */
+    seen[0] = 1;
+    work[nwork++] = 0;
+    queued[0] = 1;
+    while (nwork > 0) {
+      k = work[--nwork];
+      queued[k] = 0;
+      ns = successors(cc, k, t);
+      for (j = 0; j < ns; j++) {
+        RegSet s = cc->known[k];
+        int changed_t;
+        known_transfer(cc, k, &s, ns == 2 && GET_OPCODE(cc->p->code[k]) == OP_FORLOOP ? j : 1, &uses[k]);
+        if (!seen[t[j]]) { seen[t[j]] = 1; cc->known[t[j]] = s; changed_t = 1; }
+        else changed_t = rs_and(&cc->known[t[j]], &s);
+        if (changed_t && !queued[t[j]]) { queued[t[j]] = 1; work[nwork++] = t[j]; }
+      }
+    }
+    /* keep the ones about to be used as numbers */
+    for (k = 0; k < n; k++) {
+      if (!seen[k]) memset(&cc->known[k], 0, sizeof(RegSet));
+      else rs_and(&cc->known[k], &uses[k]);
+    }
+  }
 }
 
 static void instruction (Compiler *cc) {
@@ -1112,11 +1537,21 @@ static void instruction (Compiler *cc) {
   Instruction i = p->code[pcidx];
   int a = GETARG_A(i);
   switch (GET_OPCODE(i)) {
-    case OP_MOVE:
-      copy_tvalue(cc, a, 0, reg(GETARG_B(i)));
+    case OP_MOVE: {
+      int b = GETARG_B(i);
+      copy_tvalue(cc, a, 0, reg(b));
+      if (known(cc, b)) {
+        lget(cc, V_DREG(b)); lset(cc, V_DREG(a));
+        rs_add(&cc->cur, a);
+      }
       break;
+    }
     case OP_LOADK:
       copy_tvalue(cc, a, 1, (unsigned int)(size_t)(p->k + GETARG_Bx(i)));
+      if (cc->spec && ttisnumber(p->k + GETARG_Bx(i))) {
+        f64c(cc, nvalue(p->k + GETARG_Bx(i))); lset(cc, V_DREG(a));
+        rs_add(&cc->cur, a);
+      }
       break;
     case OP_LOADBOOL:
       lget(cc, V_BASE); i32c(cc, GETARG_B(i) ? 1 : 0);
@@ -1140,18 +1575,27 @@ static void instruction (Compiler *cc) {
     case OP_MOD: arith(cc, i, W_F64_FLOOR); break;
     case OP_UNM: {
       int b = GETARG_B(i);
+      if (speculative(cc, pcidx)) {
+        guard(cc, b, pcidx);
+        load_num(cc, b);
+        op(cc, W_F64_NEG);
+        def_num(cc, a);
+        break;
+      }
       block(cc, W_BLOCK, W_VOID);
       block(cc, W_BLOCK, W_VOID);
-      not_number(cc, b);
-      b_byte(C, W_BR_IF); b_u32(C, 0);
+      if (!known(cc, b)) {
+        not_number(cc, b);
+        b_byte(C, W_BR_IF); b_u32(C, 0);
+      }
       load_num(cc, b);
       op(cc, W_F64_NEG);
       lset(cc, V_D1);
       store_num(cc, a, V_D1);
+      rs_del(&cc->cur, a);
       b_byte(C, W_BR); b_u32(C, 1);
       end(cc);
-      call_helper(cc, H_EXEC);
-      reload_base(cc);
+      helper_exec(cc);
       end(cc);
       break;
     }
@@ -1179,40 +1623,35 @@ static void instruction (Compiler *cc) {
       if (GETARG_Bx(i) <= MAXINDEXRK)
         get_table(cc, a, -1, RKASK(GETARG_Bx(i)), 0);
       else {
-        call_helper(cc, H_EXEC);
-        reload_base(cc);
+        helper_exec(cc);
       }
       break;
     case OP_SETGLOBAL:
       if (GETARG_Bx(i) <= MAXINDEXRK)
         set_table(cc, -1, RKASK(GETARG_Bx(i)), a);
       else {
-        call_helper(cc, H_EXEC);
-        reload_base(cc);
+        helper_exec(cc);
       }
       break;
     case OP_GETTABLE:
       if (inline_key(cc, GETARG_C(i)))
         get_table(cc, a, GETARG_B(i), GETARG_C(i), 0);
       else {
-        call_helper(cc, H_EXEC);
-        reload_base(cc);
+        helper_exec(cc);
       }
       break;
     case OP_SELF:
       if (inline_key(cc, GETARG_C(i)))
         get_table(cc, a, GETARG_B(i), GETARG_C(i), 1);
       else {
-        call_helper(cc, H_EXEC);
-        reload_base(cc);
+        helper_exec(cc);
       }
       break;
     case OP_SETTABLE:
       if (inline_key(cc, GETARG_B(i)))
         set_table(cc, a, GETARG_B(i), GETARG_C(i));
       else {
-        call_helper(cc, H_EXEC);
-        reload_base(cc);
+        helper_exec(cc);
       }
       break;
     case OP_NOT:
@@ -1257,20 +1696,24 @@ static void instruction (Compiler *cc) {
       call_helper(cc, H_CALL);
       return_if_nonzero(cc);
       reload_base(cc);
+      reestablish(cc, pcidx + 1);
       break;
     case OP_TAILCALL:
       call_helper(cc, H_TAILCALL);
       return_if_nonzero(cc);
       reload_base(cc);
+      reestablish(cc, pcidx + 1);
       break;
     case OP_RETURN:
       call_helper(cc, H_RETURN);
       op(cc, W_RETURN);
       break;
     case OP_FORLOOP: {
-      /* idx = ra + step; continue if (0 < step ? idx <= limit : limit <= idx) */
-      lget(cc, V_BASE); mem(cc, W_F64_LOAD, 3, reg(a) + TV_VALUE);
-      lget(cc, V_BASE); mem(cc, W_F64_LOAD, 3, reg(a + 2) + TV_VALUE);
+      /* idx = ra + step; continue if (0 < step ? idx <= limit : limit <= idx)
+      ** (like the interpreter, without checking types: forprep did) */
+      RegSet saved;
+      load_num(cc, a);
+      load_num(cc, a + 2);
       ltee(cc, V_D2);
       op(cc, W_F64_ADD);
       lset(cc, V_D1);
@@ -1279,53 +1722,59 @@ static void instruction (Compiler *cc) {
       op(cc, W_F64_LT);
       block(cc, W_IF, W_TYPE_I32);
       lget(cc, V_D1);
-      lget(cc, V_BASE); mem(cc, W_F64_LOAD, 3, reg(a + 1) + TV_VALUE);
+      load_num(cc, a + 1);
       op(cc, W_F64_LE);
       b_byte(C, W_ELSE);
-      lget(cc, V_BASE); mem(cc, W_F64_LOAD, 3, reg(a + 1) + TV_VALUE);
+      load_num(cc, a + 1);
       lget(cc, V_D1);
       op(cc, W_F64_LE);
       end(cc);
       block(cc, W_IF, W_VOID);
-      lget(cc, V_BASE); lget(cc, V_D1);
-      mem(cc, W_F64_STORE, 3, reg(a) + TV_VALUE);
-      store_num(cc, a + 3, V_D1);
+      saved = cc->cur;
+      lget(cc, V_D1);
+      def_num(cc, a);
+      lget(cc, V_D1);
+      def_num(cc, a + 3);
       jump(cc, pcidx + 1 + GETARG_sBx(i));
+      cc->cur = saved;
       end(cc);
       break;
     }
-    case OP_FORPREP:
+    case OP_FORPREP: {
+      int target = pcidx + 1 + GETARG_sBx(i);
       call_helper(cc, H_FORPREP);
       reload_base(cc);
-      jump(cc, pcidx + 1 + GETARG_sBx(i));
+      reestablish(cc, target);
+      jump(cc, target);
       break;
+    }
     case OP_TFORLOOP: {
       int next = pcidx + 1;
+      int target = next + 1 + GETARG_sBx(p->code[next]);
       call_helper(cc, H_TFORLOOP);
       lset(cc, V_R);
       reload_base(cc);
       lget(cc, V_R);
       block(cc, W_IF, W_VOID);
-      jump(cc, next + 1 + GETARG_sBx(p->code[next]));
+      reestablish(cc, target);
+      jump(cc, target);
       end(cc);
+      reestablish(cc, pcidx + 2);
       jump(cc, pcidx + 2);
       break;
     }
     case OP_CLOSURE: {
       int nup = p->p[GETARG_Bx(i)]->nups;
-      call_helper(cc, H_EXEC);
-      reload_base(cc);
+      helper_exec(cc);
       if (nup > 0) jump(cc, pcidx + 1 + nup);
       break;
     }
     case OP_SETLIST:
-      call_helper(cc, H_EXEC);
-      reload_base(cc);
+      helper_exec(cc);
       if (GETARG_C(i) == 0) jump(cc, pcidx + 2);
       break;
     default:  /* everything else goes through the generic helper */
-      call_helper(cc, H_EXEC);
-      reload_base(cc);
+      helper_exec(cc);
       break;
   }
 }
@@ -1333,13 +1782,40 @@ static void instruction (Compiler *cc) {
 /* Largest function compiled: each instruction is a nested block. */
 #define LJIT_MAX_CODE 3000
 
+/* Can the function be entered at k from outside (often)? At 0, after a
+** call (that returned through luaV_execute, or a coroutine resumed), and
+** at loop heads (the interpreter's loop got hot). */
+static int entry_point (Compiler *cc, int k) {
+  Instruction prev;
+  if (k == 0) return 1;
+  prev = cc->p->code[k - 1];
+  if (GET_OPCODE(prev) == OP_CALL) return 1;
+  {
+    int j;
+    for (j = 0; j < cc->n; j++) {
+      Instruction i = cc->p->code[j];
+      int t = -1;
+      if (GET_OPCODE(i) == OP_JMP || GET_OPCODE(i) == OP_FORLOOP)
+        t = j + 1 + GETARG_sBx(i);
+      if (t == k && t <= j) return 1;
+    }
+  }
+  return 0;
+}
+
 static int compile_body (Compiler *cc) {
-  int k;
+  int k, j;
   int n = cc->n;
-  /* locals: base, idx, t, r, tab, s (i32); d1, d2 (f64) */
+  int nstubs = 0;
+  int *stub = cc->stub;
+  for (k = 0; k < n; k++) {
+    stub[k] = -1;
+    if (!rs_empty(&cc->known[k]) && entry_point(cc, k)) stub[k] = nstubs++;
+  }
+  /* locals: base, idx, t, r, tab, s (i32); d1, d2 and one per register (f64) */
   b_u32(C, 2);
   b_u32(C, NUM_I32_LOCALS); b_byte(C, W_TYPE_I32);
-  b_u32(C, 2); b_byte(C, W_TYPE_F64);
+  b_u32(C, 2 + cc->p->maxstacksize); b_byte(C, W_TYPE_F64);
 
   reload_base(cc);
   /* idx = (L->savedpc - code) / sizeof(Instruction) */
@@ -1351,23 +1827,69 @@ static int compile_body (Compiler *cc) {
   op(cc, W_I32_SHR_U);
   lset(cc, V_IDX);
 
+  /* Layout:
+  **   block $exit
+  **     loop $dispatch
+  **       block (n: the block of k ends where k's code starts)
+  **         block (nstubs: stub s's code follows its block)
+  **           block $deopt_entry
+  **             br_table on idx
+  **           end: entering where registers are known, with no stub
+  **         stubs: load and check known[k], then on to k's code
+  **       code of each instruction
+  **   deopt: L->savedpc = code + idx, return LJIT_DEOPT
+  ** idx 0..n-1 enters k through its stub if it has one; n+k enters k
+  ** directly (a backward jump, from where known[k] is known). */
+  b_byte(C, W_BLOCK); b_byte(C, W_VOID);
   b_byte(C, W_LOOP); b_byte(C, W_VOID);
-  for (k = 0; k < n; k++) {
+  for (k = 0; k < n + nstubs + 1; k++) {
     b_byte(C, W_BLOCK); b_byte(C, W_VOID);
   }
   lget(cc, V_IDX);
   b_byte(C, W_BR_TABLE);
-  b_u32(C, n);
-  for (k = 0; k < n; k++) b_u32(C, k);
+  b_u32(C, 2 * n);
+  for (k = 0; k < n; k++) {
+    if (rs_empty(&cc->known[k])) b_u32(C, 1 + nstubs + k);
+    else if (stub[k] >= 0) b_u32(C, 1 + stub[k]);
+    else b_u32(C, 0);
+  }
+  for (k = 0; k < n; k++) b_u32(C, 1 + nstubs + k);
   b_u32(C, 0);
+  b_byte(C, W_END);  /* $deopt_entry: leave at idx */
+  b_byte(C, W_BR); b_u32(C, (unsigned int)(nstubs + n + 1));
+  for (j = 0; j < nstubs; j++) {
+    b_byte(C, W_END);
+    for (k = 0; k < n && stub[k] != j; k++) ;
+    cc->pcidx = k;
+    cc->depth = 0;
+    cc->exitlabel = (nstubs - 1 - j) + n + 1;
+    memset(&cc->cur, 0, sizeof(cc->cur));
+    {
+      int r;
+      for (r = 0; r < LJIT_MAXREGS; r++)
+        if (rs_has(&cc->known[k], r)) guard(cc, r, k);
+    }
+    b_byte(C, W_BR); b_u32(C, (unsigned int)((nstubs - 1 - j) + k));
+  }
   for (k = 0; k < n; k++) {
     b_byte(C, W_END);  /* code for instruction k follows its block */
     cc->pcidx = k;
     cc->depth = 0;
+    cc->exitlabel = (n - 1 - k) + 1;
+    cc->cur = cc->known[k];
     instruction(cc);
   }
   b_byte(C, W_END);  /* loop */
   op(cc, W_UNREACHABLE);
+  b_byte(C, W_END);  /* $exit */
+  lget(cc, V_L);
+  lget(cc, V_IDX);
+  i32c(cc, 2);
+  op(cc, W_I32_SHL);
+  i32c(cc, (int)pcaddr(cc, 0));
+  op(cc, W_I32_ADD);
+  mem(cc, W_I32_STORE, 2, L_SAVEDPC);
+  i32c(cc, LJIT_DEOPT);
   b_byte(C, W_END);  /* function */
   return !C->oom;
 }
@@ -1425,6 +1947,7 @@ int ljit_compile (lua_State *L, Proto *p) {
   Compiler cc;
   Buf m = { 0 }, s = { 0 };
   int index = 0;
+  char *scratch = NULL;
   double t0 = emscripten_get_now();
   if (p->jit != 0) return p->jit > 0;
   p->jit = -1;  /* unless we succeed */
@@ -1437,6 +1960,26 @@ int ljit_compile (lua_State *L, Proto *p) {
   cc.p = p;
   cc.indexname = G(L)->tmname[TM_INDEX];
   cc.n = p->sizecode;
+  cc.spec = p->jitdeopts < LJIT_MAX_DEOPTS && p->maxstacksize <= LJIT_MAXREGS;
+  /* The analysis's memory, in one block. Compiling should leave the heap
+  ** as it found it, so the interpreter's objects get the same addresses
+  ** (tostring of a table, the order of pairs over table keys) with the JIT
+  ** on or off: like the code buffers, it is big enough for malloc to take
+  ** it from the top of the heap, not from the free lists of small blocks
+  ** the interpreter's objects come from, and the top is whole again once
+  ** everything is freed. */
+  {
+    size_t size = (size_t)cc.n * (2 * sizeof(RegSet) + 2 * sizeof(int) + 2);
+    scratch = (char *)calloc(size < 4096 ? 4096 : size, 1);
+  }
+  if (scratch == NULL) goto done;
+  cc.known = (RegSet *)scratch;
+  cc.uses = cc.known + cc.n;
+  cc.work = (int *)(cc.uses + cc.n);
+  cc.stub = cc.work + cc.n;
+  cc.seen = (char *)(cc.stub + cc.n);
+  cc.queued = cc.seen + cc.n;
+  analyze(&cc);
   if (!compile_body(&cc)) goto done;
 
   module_header(&m);
@@ -1453,9 +1996,10 @@ int ljit_compile (lua_State *L, Proto *p) {
 done:
   if (p->jit > 0) ljit_ncompiled++;
   else ljit_nfailed++;
-  free(cc.code.p);
-  free(m.p);
   free(s.p);
+  free(m.p);
+  free(cc.code.p);
+  free(scratch);
   ljit_ms += emscripten_get_now() - t0;
   return p->jit > 0;
 }
@@ -1463,6 +2007,47 @@ done:
 void ljit_free (Proto *p) {
   if (p->jit > 0) ljit_release(p->jit);
   p->jit = 0;
+  if (p->jitnotes) {
+    int j;
+    for (j = 0; j < LJIT_NOTES; j++)
+      if (ljit_notes[j].p == p) ljit_notes[j].p = NULL;
+    p->jitnotes = 0;
+  }
+}
+
+/* The interpreter or a deopt saw instruction k go the slow way (operands
+** that aren't numbers): it won't be compiled speculatively again. */
+void ljit_note (Proto *p, int k) {
+  unsigned int h = ljit_notehash(p, k);
+  int j;
+  if (!ljit_enabled) return;
+  p->jitnotes = 1;
+  for (j = 0; j < LJIT_NOTE_PROBES; j++) {
+    unsigned int slot = (h + j) & (LJIT_NOTES - 1);
+    if (ljit_notes[slot].p == NULL || (ljit_notes[slot].p == p && ljit_notes[slot].k == k)) {
+      ljit_notes[slot].p = p;
+      ljit_notes[slot].k = k;
+      return;
+    }
+  }
+  ljit_notes[h].p = p;  /* full: forget an older note */
+  ljit_notes[h].k = k;
+}
+
+/* Compiled code returned LJIT_DEOPT for the frame L->ci, at L->savedpc:
+** notes the instruction, and throws the code away (none of it is running:
+** a deopt returns all the way to luaV_execute) for the interpreter to run
+** the function, and learn more, until it is hot again. */
+void ljit_deopt (lua_State *L) {
+  Proto *p = clvalue(L->ci->func)->l.p;
+  ljit_ndeopts++;
+  ljit_note(p, cast_int(L->savedpc - p->code));
+  p->jitdeopts++;
+  if (p->jit > 0) {
+    ljit_release(p->jit);
+    p->jit = 0;
+    p->jitcount = 0;
+  }
 }
 
 #else  /* !LJIT_ENABLED */
@@ -1475,6 +2060,14 @@ int ljit_compile (lua_State *L, Proto *p) {
 
 void ljit_free (Proto *p) {
   p->jit = 0;
+}
+
+void ljit_note (Proto *p, int k) {
+  (void)p; (void)k;
+}
+
+void ljit_deopt (lua_State *L) {
+  (void)L;
 }
 
 #endif

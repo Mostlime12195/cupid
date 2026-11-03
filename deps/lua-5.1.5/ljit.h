@@ -15,6 +15,7 @@
 #define LJIT_RET1      4  /* returned (luaD_poscall gave 1) */
 #define LJIT_YIELD     5  /* a C function yielded */
 #define LJIT_INTERP    6  /* a hook was set: interpret from L->savedpc */
+#define LJIT_DEOPT     7  /* a speculation failed: interpret from L->savedpc */
 
 /* Calls or loop iterations before a function is compiled. */
 extern int ljit_threshold;
@@ -41,5 +42,17 @@ typedef int (*ljit_Function) (lua_State *L);
 /* Compiles p; returns 1 on success (p->jit set). */
 int ljit_compile (lua_State *L, Proto *p);
 void ljit_free (Proto *p);
+
+/* Type feedback: the interpreter calls ljit_feedback where arithmetic or a
+** comparison went the slow way (operands that aren't numbers), so compiled
+** code won't speculate there. luaV_execute calls ljit_deopt when compiled
+** code returns LJIT_DEOPT. */
+void ljit_note (Proto *p, int k);
+void ljit_deopt (lua_State *L);
+#if LJIT_ENABLED
+#define ljit_feedback(p,pc) ljit_note(p, cast_int((pc) - (p)->code))
+#else
+#define ljit_feedback(p,pc) ((void)0)
+#endif
 
 #endif
