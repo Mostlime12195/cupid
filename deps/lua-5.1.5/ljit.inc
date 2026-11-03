@@ -346,6 +346,7 @@ EMSCRIPTEN_KEEPALIVE int ljit_h_tforloop (lua_State *L, const Instruction *pc) {
 EMSCRIPTEN_KEEPALIVE int ljit_h_enter (lua_State *L) {
   int r;
   int replaced = 0;  /* the frame we entered was replaced by a tail call */
+  ptrdiff_t level = L->ci - L->base_ci;  /* (L->ci may be reallocated) */
   if (!ljit_enabled || ljit_depth >= LJIT_MAX_DEPTH ||
       (L->hookmask & (LUA_MASKLINE | LUA_MASKCOUNT)))
     return LJIT_CALL;
@@ -361,7 +362,13 @@ EMSCRIPTEN_KEEPALIVE int ljit_h_enter (lua_State *L) {
     ljit_depth++;
     r = ((ljit_Function)(size_t)p->jit)(L);
     ljit_depth--;
-    if (r != LJIT_TAILCALL || (L->hookmask & (LUA_MASKLINE | LUA_MASKCOUNT)))
+    /* LJIT_TAILCALL also comes up from a frame above the one we entered
+    ** (a call it made, through ljit_h_enter, was replaced by a function
+    ** that isn't compiled). Our frame is then still on the stack, below
+    ** L->ci: hand both to luaV_execute (default case below). Only when
+    ** L->ci is our frame's slot was our frame itself replaced. */
+    if (r != LJIT_TAILCALL || L->ci - L->base_ci != level ||
+        (L->hookmask & (LUA_MASKLINE | LUA_MASKCOUNT)))
       break;
     replaced = 1;  /* the callee was replaced by a tail call: run that one */
   }
