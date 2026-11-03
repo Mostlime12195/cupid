@@ -552,6 +552,12 @@ enum { V_L = 0, V_BASE, V_IDX, V_T, V_R, V_TAB, V_S, V_D1, V_D2 };
 #define L_HOOKMASK ((int)offsetof(lua_State, hookmask))
 #define L_CI      ((int)offsetof(lua_State, ci))
 #define CI_FUNC   ((int)offsetof(CallInfo, func))
+#define CI_BASE   ((int)offsetof(CallInfo, base))
+#define CI_SAVEDPC ((int)offsetof(CallInfo, savedpc))
+#define CI_NRESULTS ((int)offsetof(CallInfo, nresults))
+#define CI_SIZE   ((int)sizeof(CallInfo))
+#define L_TOP     ((int)offsetof(lua_State, top))
+#define L_OPENUPVAL ((int)offsetof(lua_State, openupval))
 #define LCL_ENV   ((int)offsetof(LClosure, env))
 #define T_FLAGS   ((int)offsetof(Table, flags))
 #define T_MARKED  ((int)offsetof(Table, marked))
@@ -1756,10 +1762,60 @@ static void instruction (Compiler *cc) {
       reload_base(cc);
       reestablish(cc, pcidx + 1);
       break;
-    case OP_RETURN:
+    case OP_RETURN: {
+      int nres = GETARG_B(i) - 1;
+      if (nres >= 0 && nres <= 8) {
+        /* ljit_h_return inline for its usual case: no return hook, no
+        ** upvalue open in this frame, and the caller wants nres results. */
+        int j, half;
+        block(cc, W_BLOCK, W_VOID);  /* slow */
+        lget(cc, V_L); mem(cc, W_I32_LOAD8_U, 0, L_HOOKMASK);
+        i32c(cc, LUA_MASKRET); op(cc, W_I32_AND);
+        br_if_out(cc, 0);
+        lget(cc, V_L); mem(cc, W_I32_LOAD, 2, L_OPENUPVAL);
+        ltee(cc, V_S);
+        block(cc, W_IF, W_VOID);
+        lget(cc, V_S); mem(cc, W_I32_LOAD, 2, UV_V);
+        lget(cc, V_BASE);
+        op(cc, W_I32_GE_U);
+        br_if_out(cc, 1);
+        end(cc);
+        lget(cc, V_L); mem(cc, W_I32_LOAD, 2, L_CI);
+        ltee(cc, V_T);
+        mem(cc, W_I32_LOAD, 2, CI_NRESULTS);
+        i32c(cc, nres); op(cc, W_I32_NE);
+        br_if_out(cc, 0);
+        /* results to ci->func and up (below them: copying up is safe) */
+        lget(cc, V_T); mem(cc, W_I32_LOAD, 2, CI_FUNC);
+        lset(cc, V_S);
+        for (j = 0; j < nres; j++)
+          for (half = 0; half < 2; half++) {
+            lget(cc, V_S);
+            lget(cc, V_BASE);
+            mem(cc, W_I64_LOAD, 3, reg(a + j) + half * 8);
+            mem(cc, W_I64_STORE, 3, (unsigned int)(j * TV_SIZE + half * 8));
+          }
+        lget(cc, V_L);
+        lget(cc, V_S); i32c(cc, nres * TV_SIZE); op(cc, W_I32_ADD);
+        mem(cc, W_I32_STORE, 2, L_TOP);
+        lget(cc, V_L);
+        lget(cc, V_T); i32c(cc, CI_SIZE); op(cc, W_I32_SUB);
+        ltee(cc, V_T);
+        mem(cc, W_I32_STORE, 2, L_CI);
+        lget(cc, V_L);
+        lget(cc, V_T); mem(cc, W_I32_LOAD, 2, CI_BASE);
+        mem(cc, W_I32_STORE, 2, L_BASE);
+        lget(cc, V_L);
+        lget(cc, V_T); mem(cc, W_I32_LOAD, 2, CI_SAVEDPC);
+        mem(cc, W_I32_STORE, 2, L_SAVEDPC);
+        i32c(cc, LJIT_RET1);
+        op(cc, W_RETURN);
+        end(cc);
+      }
       call_helper(cc, H_RETURN);
       op(cc, W_RETURN);
       break;
+    }
     case OP_FORLOOP: {
       /* idx = ra + step; continue if (0 < step ? idx <= limit : limit <= idx)
       ** (like the interpreter, without checking types: forprep did) */
