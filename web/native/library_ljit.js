@@ -13,7 +13,7 @@ addToLibrary({
       if (!ljit.imports) {
         // Order must match the H_ enum in ljit.inc.
         const helpers = ['ljit_h_exec', 'ljit_h_compare', 'ljit_h_call', 'ljit_h_tailcall',
-                         'ljit_h_return', 'ljit_h_forprep', 'ljit_h_tforloop', 'ljit_h_enter'];
+                         'ljit_h_return', 'ljit_h_forprep', 'ljit_h_tforloop'];
         const e = { m: wasmMemory };
         helpers.forEach((name, i) => { e[`h${i}`] = wasmExports[name] || Module[`_${name}`]; });
         ljit.imports = { e };

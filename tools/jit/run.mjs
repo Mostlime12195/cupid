@@ -16,4 +16,7 @@ try {
 } catch (e) {
   if (e?.name !== 'ExitStatus') throw e;
 }
-if (stats) console.error(`[ljit] compiled ${lua._ljit_stats(0)}, not compiled ${lua._ljit_stats(1)}`);
+if (stats) {
+  console.error(`[ljit] compiled ${lua._ljit_stats(0)}, not compiled ${lua._ljit_stats(1)}, ` +
+    `${(lua._ljit_stats(2) / 1024).toFixed(1)} KiB of wasm in ${lua._ljit_stats(3).toFixed(1)} ms`);
+}

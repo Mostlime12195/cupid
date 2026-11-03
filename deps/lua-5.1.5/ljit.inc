@@ -41,11 +41,18 @@ int ljit_pending = 0;
 extern int ljit_instantiate (const unsigned char *bytes, int size);
 extern void ljit_release (int index);
 
-/* Functions compiled / that failed to compile, for tests and diagnostics. */
+/* Functions compiled / that failed to compile, bytes of wasm generated and
+** time spent compiling (ours and the browser's), for tests and diagnostics. */
 static int ljit_ncompiled = 0, ljit_nfailed = 0;
+static double ljit_nbytes = 0, ljit_ms = 0;
 
-EMSCRIPTEN_KEEPALIVE int ljit_stats (int failed) {
-  return failed ? ljit_nfailed : ljit_ncompiled;
+EMSCRIPTEN_KEEPALIVE double ljit_stats (int what) {
+  switch (what) {
+    case 0: return ljit_ncompiled;
+    case 1: return ljit_nfailed;
+    case 2: return ljit_nbytes;
+    default: return ljit_ms;
+  }
 }
 
 /* Called from JS (player options, tests). */
@@ -256,14 +263,64 @@ EMSCRIPTEN_KEEPALIVE int ljit_h_compare (lua_State *L, const Instruction *pc) {
   }
 }
 
-/* OP_CALL: 0 if a C function was called (continue), else an LJIT_ code. */
+/* After ljit_h_call set up a Lua call: runs the callee's compiled code
+** directly (no trip through luaV_execute) when possible. Returns 0 when the
+** callee has returned, else an LJIT_ code for the caller to return, having
+** counted the callee's frame in ljit_pending. */
+static int ljit_enter (lua_State *L) {
+  int r;
+  int replaced = 0;  /* the frame we entered was replaced by a tail call */
+  ptrdiff_t level = L->ci - L->base_ci;  /* (L->ci may be reallocated) */
+  if (!ljit_enabled || ljit_depth >= LJIT_MAX_DEPTH ||
+      (L->hookmask & (LUA_MASKLINE | LUA_MASKCOUNT)))
+    return LJIT_CALL;
+  for (;;) {
+    Proto *p = clvalue(L->ci->func)->l.p;
+    if (p->jit == 0 && ++p->jitcount >= ljit_threshold)
+      ljit_compile(L, p);
+    if (p->jit <= 0) {
+      if (!replaced) return LJIT_CALL;  /* luaV_execute runs the callee */
+      ljit_pending++;  /* it takes over the frame that was replaced */
+      return LJIT_TAILCALL;
+    }
+    ljit_depth++;
+    r = ((ljit_Function)(size_t)p->jit)(L);
+    ljit_depth--;
+    /* LJIT_TAILCALL also comes up from a frame above the one we entered
+    ** (a call it made, through ljit_enter, was replaced by a function
+    ** that isn't compiled). Our frame is then still on the stack, below
+    ** L->ci: hand both to luaV_execute (default case below). Only when
+    ** L->ci is our frame's slot was our frame itself replaced. */
+    if (r != LJIT_TAILCALL || L->ci - L->base_ci != level ||
+        (L->hookmask & (LUA_MASKLINE | LUA_MASKCOUNT)))
+      break;
+    replaced = 1;  /* the callee was replaced by a tail call: run that one */
+  }
+  switch (r) {
+    case LJIT_RET1:
+      L->top = L->ci->top;
+      return 0;
+    case LJIT_RET0:
+      return 0;
+    default:
+      /* The callee's frame stays on the Lua stack and luaV_execute takes
+      ** it over, then handles r as if the callee had returned it (a call
+      ** the callee made, a tail call, a yield or a hook). */
+      ljit_pending++;
+      return r;
+  }
+}
+
+/* OP_CALL: 0 if the callee (a C function, or compiled Lua code entered
+** directly) has returned and the caller continues, else an LJIT_ code for
+** the caller to return to luaV_execute. */
 EMSCRIPTEN_KEEPALIVE int ljit_h_call (lua_State *L, const Instruction *pc) {
   LJ_DECODE
   int b = GETARG_B(i);
   int nresults = GETARG_C(i) - 1;
   if (b != 0) L->top = ra+b;
   switch (luaD_precall(L, ra, nresults)) {
-    case PCRLUA: return LJIT_CALL;
+    case PCRLUA: return ljit_enter(L);
     case PCRC: {
       if (nresults >= 0) L->top = L->ci->top;
       return 0;
@@ -301,7 +358,8 @@ EMSCRIPTEN_KEEPALIVE int ljit_h_return (lua_State *L, const Instruction *pc) {
   LJ_DECODE
   int b = GETARG_B(i);
   if (b != 0) L->top = ra+b-1;
-  if (L->openupval) luaF_close(L, base);
+  /* (luaF_close would do nothing unless an upvalue is open in this frame) */
+  if (L->openupval && ngcotouv(L->openupval)->v >= base) luaF_close(L, base);
   b = luaD_poscall(L, ra);
   return b ? LJIT_RET1 : LJIT_RET0;
 }
@@ -339,58 +397,10 @@ EMSCRIPTEN_KEEPALIVE int ljit_h_tforloop (lua_State *L, const Instruction *pc) {
   return 0;
 }
 
-/* After ljit_h_call set up a Lua call: runs the callee's compiled code
-** directly (no trip through luaV_execute) when possible. Returns 0 when the
-** callee has returned, else an LJIT_ code for the caller to return, having
-** counted the callee's frame in ljit_pending. */
-EMSCRIPTEN_KEEPALIVE int ljit_h_enter (lua_State *L) {
-  int r;
-  int replaced = 0;  /* the frame we entered was replaced by a tail call */
-  ptrdiff_t level = L->ci - L->base_ci;  /* (L->ci may be reallocated) */
-  if (!ljit_enabled || ljit_depth >= LJIT_MAX_DEPTH ||
-      (L->hookmask & (LUA_MASKLINE | LUA_MASKCOUNT)))
-    return LJIT_CALL;
-  for (;;) {
-    Proto *p = clvalue(L->ci->func)->l.p;
-    if (p->jit == 0 && ++p->jitcount >= ljit_threshold)
-      ljit_compile(L, p);
-    if (p->jit <= 0) {
-      if (!replaced) return LJIT_CALL;  /* luaV_execute runs the callee */
-      ljit_pending++;  /* it takes over the frame that was replaced */
-      return LJIT_TAILCALL;
-    }
-    ljit_depth++;
-    r = ((ljit_Function)(size_t)p->jit)(L);
-    ljit_depth--;
-    /* LJIT_TAILCALL also comes up from a frame above the one we entered
-    ** (a call it made, through ljit_h_enter, was replaced by a function
-    ** that isn't compiled). Our frame is then still on the stack, below
-    ** L->ci: hand both to luaV_execute (default case below). Only when
-    ** L->ci is our frame's slot was our frame itself replaced. */
-    if (r != LJIT_TAILCALL || L->ci - L->base_ci != level ||
-        (L->hookmask & (LUA_MASKLINE | LUA_MASKCOUNT)))
-      break;
-    replaced = 1;  /* the callee was replaced by a tail call: run that one */
-  }
-  switch (r) {
-    case LJIT_RET1:
-      L->top = L->ci->top;
-      return 0;
-    case LJIT_RET0:
-      return 0;
-    default:
-      /* The callee's frame stays on the Lua stack and luaV_execute takes
-      ** it over, then handles r as if the callee had returned it (a call
-      ** the callee made, a tail call, a yield or a hook). */
-      ljit_pending++;
-      return r;
-  }
-}
-
 /* Import order; must match the helper list in library_ljit.js. */
 enum {
   H_EXEC, H_COMPARE, H_CALL, H_TAILCALL, H_RETURN, H_FORPREP, H_TFORLOOP,
-  H_ENTER, NUM_HELPERS
+  NUM_HELPERS
 };
 
 /* ------------------------------------------------------------------------
@@ -1130,18 +1140,8 @@ static void instruction (Compiler *cc) {
       break;
     }
     case OP_CALL:
-      /* r = call(); if r == LJIT_CALL then r = enter() end; if r ~= 0 return r */
       call_helper(cc, H_CALL);
-      ltee(cc, V_R);
-      b_byte(C, W_IF); b_byte(C, W_VOID);
-      lget(cc, V_R); i32c(cc, LJIT_CALL); op(cc, W_I32_NE);
-      b_byte(C, W_IF); b_byte(C, W_VOID);
-      lget(cc, V_R); op(cc, W_RETURN);
-      b_byte(C, W_END);
-      lget(cc, V_L);
-      b_byte(C, W_CALL); b_u32(C, H_ENTER);
       return_if_nonzero(cc);
-      b_byte(C, W_END);
       reload_base(cc);
       break;
     case OP_TAILCALL:
@@ -1277,7 +1277,7 @@ static void module_header (Buf *m) {
   b_u32(&s, NUM_HELPERS + 1);
   for (h = 0; h < NUM_HELPERS; h++) {
     char name[8];
-    int type = h == H_ENTER ? 0 : (h == H_EXEC || h == H_FORPREP) ? 1 : 2;
+    int type = (h == H_EXEC || h == H_FORPREP) ? 1 : 2;
     snprintf(name, sizeof(name), "h%d", h);
     b_str(&s, "e");
     b_str(&s, name);
@@ -1311,6 +1311,7 @@ int ljit_compile (lua_State *L, Proto *p) {
   Compiler cc;
   Buf m = { 0 }, s = { 0 };
   int index = 0;
+  double t0 = emscripten_get_now();
   (void)L;
   if (p->jit != 0) return p->jit > 0;
   p->jit = -1;  /* unless we succeed */
@@ -1333,6 +1334,7 @@ int ljit_compile (lua_State *L, Proto *p) {
 
   index = ljit_instantiate(m.p, (int)m.n);
   if (index > 0) p->jit = index;
+  ljit_nbytes += m.n;
 
 done:
   if (p->jit > 0) ljit_ncompiled++;
@@ -1340,6 +1342,7 @@ done:
   free(cc.code.p);
   free(m.p);
   free(s.p);
+  ljit_ms += emscripten_get_now() - t0;
   return p->jit > 0;
 }
 
