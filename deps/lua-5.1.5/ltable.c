@@ -77,6 +77,9 @@ static const Node dummynode_ = {
   {{{NULL}, LUA_TNIL, NULL}}  /* key */
 };
 
+/* LÖVE web: for the JIT, which must not add keys to it (ljit.inc) */
+const Node *const luaH_dummynode = dummynode;
+
 
 /*
 ** hash for lua_Numbers

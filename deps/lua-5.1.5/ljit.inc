@@ -1221,21 +1221,64 @@ static void get_table (Compiler *cc, int a, int table, int key, int self) {
 
 /* V_TAB[key] = value (RK); `table` is a register, or -1 for the environment. */
 static void set_table (Compiler *cc, int table, int key, int value) {
-  int numkey = key_kind(cc, key) == KEY_NUM;
   block(cc, W_BLOCK, W_VOID);  /* done */
   block(cc, W_BLOCK, W_VOID);  /* slow */
   if (table < 0) load_env(cc); else load_table_reg(cc, table, 0);
-  lookup(cc, key, 0);
-  /* The slot must hold a value already (else __newindex may apply), except
-  ** array slots of tables without a metatable. */
-  lget(cc, V_S); mem(cc, W_I32_LOAD, 2, TV_TT);
-  op(cc, W_I32_EQZ);
-  if (numkey) {
+  if (key_kind(cc, key) == KEY_STR) {
+    TString *ks = rawtsvalue(&cc->p->k[INDEXK(key)]);
+    block(cc, W_BLOCK, W_VOID);  /* write: labels write 0, slow 1, done 2 */
+    lookup_str(cc, ks);
+    lget(cc, V_S);
+    block(cc, W_IF, W_VOID);
+    /* present: a nil value may mean __newindex, unless there is no
+    ** metatable */
+    lget(cc, V_S); mem(cc, W_I32_LOAD, 2, TV_TT);
+    op(cc, W_I32_EQZ);
     lget(cc, V_TAB); mem(cc, W_I32_LOAD, 2, T_METATABLE);
     i32c(cc, 0); op(cc, W_I32_NE);
     op(cc, W_I32_AND);
+    br_if_out(cc, 2);  /* slow */
+    b_byte(C, W_BR); b_u32(C, 1);  /* write */
+    end(cc);
+    /* Absent: like luaH_set's newkey when the key's main position is free
+    ** (a table built by a constructor), in a table without a metatable
+    ** (else __newindex may apply) that isn't black (else the key needs a
+    ** GC barrier). Collisions, a full or empty hash part: the helper. */
+    lget(cc, V_TAB); mem(cc, W_I32_LOAD, 2, T_METATABLE);
+    br_if_out(cc, 1);
+    lget(cc, V_TAB); mem(cc, W_I32_LOAD8_U, 0, T_MARKED);
+    i32c(cc, bitmask(BLACKBIT)); op(cc, W_I32_AND);
+    br_if_out(cc, 1);
+    lget(cc, V_TAB); mem(cc, W_I32_LOAD, 2, T_NODE);
+    i32c(cc, (int)(size_t)luaH_dummynode);
+    op(cc, W_I32_EQ);
+    br_if_out(cc, 1);
+    lget(cc, V_TAB); mem(cc, W_I32_LOAD, 2, T_NODE);
+    i32c(cc, 1);
+    lget(cc, V_TAB); mem(cc, W_I32_LOAD8_U, 0, T_LSIZENODE);
+    op(cc, W_I32_SHL);
+    i32c(cc, 1); op(cc, W_I32_SUB);
+    i32c(cc, (int)ks->tsv.hash); op(cc, W_I32_AND);
+    i32c(cc, N_SIZE); op(cc, W_I32_MUL);
+    op(cc, W_I32_ADD);
+    ltee(cc, V_S);
+    mem(cc, W_I32_LOAD, 2, TV_TT);
+    br_if_out(cc, 1);  /* taken */
+    lget(cc, V_S); i32c(cc, (int)(size_t)ks); mem(cc, W_I32_STORE, 2, N_KEYVAL);
+    lget(cc, V_S); i32c(cc, LUA_TSTRING); mem(cc, W_I32_STORE, 2, N_KEYTT);
+    end(cc);  /* write (to V_S; the value's barrier is still checked) */
   }
-  br_if_out(cc, 0);
+  else {
+    lookup(cc, key, 0);
+    /* The slot must hold a value already (else __newindex may apply),
+    ** except array slots of tables without a metatable. */
+    lget(cc, V_S); mem(cc, W_I32_LOAD, 2, TV_TT);
+    op(cc, W_I32_EQZ);
+    lget(cc, V_TAB); mem(cc, W_I32_LOAD, 2, T_METATABLE);
+    i32c(cc, 0); op(cc, W_I32_NE);
+    op(cc, W_I32_AND);
+    br_if_out(cc, 0);
+  }
   /* Storing a collectable value into a black table needs a GC barrier. */
   if (ISK(value)) {
     if (iscollectable(&cc->p->k[INDEXK(value)])) {
