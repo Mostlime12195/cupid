@@ -315,36 +315,40 @@ static int ljit_enter (lua_State *L) {
 /* OP_CALL: 0 if the callee (a C function, or compiled Lua code entered
 ** directly) has returned and the caller continues, else an LJIT_ code for
 ** the caller to return to luaV_execute. */
+/* luaD_precall's Lua case, for the common calls that don't need to grow
+** the stack or CallInfo array, adjust varargs or call a hook. Returns 0 if
+** the call needs luaD_precall. */
+static int lean_precall (lua_State *L, StkId func, int nresults) {
+  Proto *np;
+  CallInfo *nci;
+  StkId nbase = func + 1, st;
+  if (!ttisfunction(func) || clvalue(func)->c.isC) return 0;
+  np = clvalue(func)->l.p;
+  if (np->is_vararg || (L->hookmask & LUA_MASKCALL) || L->ci == L->end_ci ||
+      (char *)L->stack_last - (char *)L->top <= np->maxstacksize * (int)sizeof(TValue))
+    return 0;
+  L->ci->savedpc = L->savedpc;
+  if (L->top > nbase + np->numparams)
+    L->top = nbase + np->numparams;
+  nci = ++L->ci;
+  nci->func = func;
+  L->base = nci->base = nbase;
+  nci->top = nbase + np->maxstacksize;
+  L->savedpc = np->code;
+  nci->tailcalls = 0;
+  nci->nresults = nresults;
+  for (st = L->top; st < nci->top; st++)
+    setnilvalue(st);
+  L->top = nci->top;
+  return 1;
+}
+
 EMSCRIPTEN_KEEPALIVE int ljit_h_call (lua_State *L, const Instruction *pc) {
   LJ_DECODE
   int b = GETARG_B(i);
   int nresults = GETARG_C(i) - 1;
   if (b != 0) L->top = ra+b;
-  if (ttisfunction(ra) && !clvalue(ra)->c.isC) {
-    /* luaD_precall's Lua case, for the common calls that don't need to
-    ** grow the stack or CallInfo array, adjust varargs or call a hook. */
-    Proto *np = clvalue(ra)->l.p;
-    CallInfo *nci;
-    StkId nbase = ra + 1, st;
-    if (!np->is_vararg && !(L->hookmask & LUA_MASKCALL) &&
-        L->ci != L->end_ci &&
-        (char *)L->stack_last - (char *)L->top > np->maxstacksize * (int)sizeof(TValue)) {
-      L->ci->savedpc = L->savedpc;
-      if (L->top > nbase + np->numparams)
-        L->top = nbase + np->numparams;
-      nci = ++L->ci;
-      nci->func = ra;
-      L->base = nci->base = nbase;
-      nci->top = nbase + np->maxstacksize;
-      L->savedpc = np->code;
-      nci->tailcalls = 0;
-      nci->nresults = nresults;
-      for (st = L->top; st < nci->top; st++)
-        setnilvalue(st);
-      L->top = nci->top;
-      return ljit_enter(L);
-    }
-  }
+  if (lean_precall(L, ra, nresults)) return ljit_enter(L);
   switch (luaD_precall(L, ra, nresults)) {
     case PCRLUA: return ljit_enter(L);
     case PCRC: {
@@ -359,24 +363,29 @@ EMSCRIPTEN_KEEPALIVE int ljit_h_tailcall (lua_State *L, const Instruction *pc) {
   LJ_DECODE
   int b = GETARG_B(i);
   if (b != 0) L->top = ra+b;
-  switch (luaD_precall(L, ra, LUA_MULTRET)) {
-    case PCRLUA: {
-      CallInfo *ci = L->ci - 1;
-      int aux;
-      StkId func = ci->func;
-      StkId pfunc = (ci+1)->func;
-      if (L->openupval) luaF_close(L, ci->base);
-      L->base = ci->base = ci->func + ((ci+1)->base - pfunc);
-      for (aux = 0; pfunc+aux < L->top; aux++)
-        setobjs2s(L, func+aux, pfunc+aux);
-      ci->top = L->top = func+aux;
-      ci->savedpc = L->savedpc;
-      ci->tailcalls++;
-      L->ci--;
-      return LJIT_TAILCALL;
+  if (!lean_precall(L, ra, LUA_MULTRET)) {
+    switch (luaD_precall(L, ra, LUA_MULTRET)) {
+      case PCRLUA: break;
+      case PCRC: return 0;
+      default: return LJIT_YIELD;
     }
-    case PCRC: return 0;
-    default: return LJIT_YIELD;
+  }
+  {
+    CallInfo *ci = L->ci - 1;
+    int aux;
+    StkId func = ci->func;
+    StkId pfunc = (ci+1)->func;
+    /* (luaF_close would do nothing unless an upvalue is open in the frame) */
+    if (L->openupval && ngcotouv(L->openupval)->v >= ci->base)
+      luaF_close(L, ci->base);
+    L->base = ci->base = ci->func + ((ci+1)->base - pfunc);
+    for (aux = 0; pfunc+aux < L->top; aux++)
+      setobjs2s(L, func+aux, pfunc+aux);
+    ci->top = L->top = func+aux;
+    ci->savedpc = L->savedpc;
+    ci->tailcalls++;
+    L->ci--;
+    return LJIT_TAILCALL;
   }
 }
 
