@@ -1,6 +1,7 @@
 // User preferences: defaults, persistence and change notifications.
 
-const KEY = 'smitten.settings';
+const KEY = 'cupid.settings';
+const OLD_KEYS = ['smitten.settings']; // the project's earlier name
 
 export const DEFAULTS = {
   // Appearance
@@ -35,7 +36,10 @@ const listeners = new Set();
 
 function load() {
   let saved = {};
-  try { saved = JSON.parse(localStorage.getItem(KEY) || '{}') || {}; } catch { /* ignore */ }
+  try {
+    const raw = localStorage.getItem(KEY) ?? OLD_KEYS.map((k) => localStorage.getItem(k)).find((v) => v != null);
+    saved = JSON.parse(raw || '{}') || {};
+  } catch { /* ignore */ }
   // Preferences from before there was a settings menu.
   const legacy = (k) => { try { const v = localStorage.getItem(k); return v === null ? undefined : JSON.parse(v); } catch { return localStorage.getItem(k); } };
   const migrated = {};

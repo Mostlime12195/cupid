@@ -1,11 +1,11 @@
-# Smitten
+# Cupid
 
 LÖVE 12 for the web: the real [LÖVE](https://love2d.org) 12 engine compiled
 to WebAssembly, with a player for publishing games and a browser-based editor
 for making them. Try the editor at
-<https://mostlime12195.github.io/smitten/>.
+<https://mostlime12195.github.io/cupid/>.
 
-Smitten is an independent project, not affiliated with the LÖVE team.
+Cupid is an independent project, not affiliated with the LÖVE team.
 
 This isn't a reimplementation of the LÖVE API. It's the upstream C++ engine
 (`love2d/love` main branch, 12.0 development) built with Emscripten, plus a
@@ -23,7 +23,7 @@ decoding, and save files.
 | `deps/theora/` | libtheora 1.2.0 decoder, for `love.video` |
 | `web/native/` | Web entry point (`web_main.cpp`) replacing LÖVE's blocking `main()` |
 | `web/player/` | The player page (standalone and embeddable) |
-| `web/editor/` | The Smitten editor |
+| `web/editor/` | The Cupid editor |
 | `web/examples/` | Example projects used by the editor |
 | `build.py` | Build script (reads source lists from `love/CMakeLists.txt`) |
 | `serve.py` | Local dev server |
@@ -188,7 +188,7 @@ blocking-style code work but don't add parallel speed.
 
 ## Lua compatibility
 
-Desktop LÖVE runs LuaJIT, which is Lua 5.1 plus extensions. Smitten runs PUC
+Desktop LÖVE runs LuaJIT, which is Lua 5.1 plus extensions. Cupid runs PUC
 Lua 5.1.5 with the LuaJIT 2.1 extensions that games and libraries commonly
 use added back (`deps/lua-5.1.5`), so code written for desktop LÖVE loads
 and behaves the same:
