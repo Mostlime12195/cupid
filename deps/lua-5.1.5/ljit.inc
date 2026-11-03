@@ -1646,6 +1646,45 @@ static void known_transfer (Compiler *cc, int k, RegSet *s, int edge,
   }
 }
 
+/* Registers kept in locals, at most: every helper call is followed by
+** reloading the known ones, so more would make big code for functions with
+** many numeric locals. */
+#define LJIT_MAX_KNOWN 16
+
+/* The LJIT_MAX_KNOWN registers used most as numbers (uses in loops count
+** more), the only ones the analysis tracks. */
+static void choose_registers (Compiler *cc, RegSet *allowed) {
+  int n = cc->n, k, r, m;
+  int weight[LJIT_MAXREGS];
+  int *inloop = cc->work;  /* (free until the analysis below) */
+  memset(weight, 0, sizeof(weight));
+  memset(allowed, 0, sizeof(*allowed));
+  memset(inloop, 0, (size_t)n * sizeof(int));
+  for (k = 0; k < n; k++) {  /* inloop[k]: loops instruction k is in */
+    Instruction i = cc->p->code[k];
+    if (GET_OPCODE(i) == OP_FORLOOP || (GET_OPCODE(i) == OP_JMP && GETARG_sBx(i) < 0)) {
+      int h = k + 1 + GETARG_sBx(i), j;
+      for (j = h < 0 ? 0 : h; j <= k; j++) inloop[j]++;
+    }
+  }
+  for (k = 0; k < n; k++) {
+    RegSet s;
+    int w = 1 + 4 * inloop[k];
+    memset(&s, 0, sizeof(s));
+    uses_transfer(cc, k, &s);  /* the registers k reads as numbers */
+    for (r = 0; r < LJIT_MAXREGS; r++)
+      if (rs_has(&s, r)) weight[r] += w;
+  }
+  for (m = 0; m < LJIT_MAX_KNOWN; m++) {
+    int best = -1;
+    for (r = 0; r < LJIT_MAXREGS; r++)
+      if (weight[r] > 0 && (best < 0 || weight[r] > weight[best])) best = r;
+    if (best < 0) break;
+    rs_add(allowed, best);
+    weight[best] = 0;
+  }
+}
+
 /* Fills cc->known. */
 static void analyze (Compiler *cc) {
   int n = cc->n, k, j, changed;
@@ -1655,6 +1694,8 @@ static void analyze (Compiler *cc) {
   int *work = cc->work;
   int nwork = 0;
   if (cc->spec) {
+    RegSet allowed;
+    choose_registers(cc, &allowed);
     /* registers used as numbers ahead, to the fixpoint */
     do {
       changed = 0;
@@ -1664,6 +1705,7 @@ static void analyze (Compiler *cc) {
         ns = successors(cc, k, t);
         for (j = 0; j < ns; j++) rs_or(&s, &uses[t[j]]);
         uses_transfer(cc, k, &s);
+        rs_and(&s, &allowed);
         if (rs_or(&uses[k], &s)) changed = 1;
       }
     } while (changed);
