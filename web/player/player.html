@@ -13,17 +13,23 @@
 </div>
 
 <div id="overlay" hidden>
+  <div class="poster" aria-hidden="true"></div>
   <div class="card">
-    <div class="logo" aria-hidden="true">❤</div>
-    <div id="overlay-title">LÖVE</div>
-    <div id="overlay-status">Loading engine…</div>
-    <div class="bar"><div id="overlay-progress"></div></div>
-    <button id="play-button" hidden>▶ Play</button>
+    <h1 id="overlay-title">LÖVE</h1>
+    <p id="overlay-by" hidden></p>
+    <button id="play-button" class="play" type="button" aria-label="Play" hidden>
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8.5 5.8v12.4c0 .8.9 1.3 1.6.9l9.8-6.2c.6-.4.6-1.4 0-1.8l-9.8-6.2c-.7-.4-1.6.1-1.6.9z"/></svg>
+    </button>
+    <div class="loading">
+      <div class="bar"><div id="overlay-progress"></div></div>
+      <div id="overlay-status">Loading…</div>
+    </div>
     <label id="file-picker" hidden>
       Drop a <code>.love</code> file here, or <u>choose one</u>
       <input type="file" accept=".love,.zip" hidden>
     </label>
   </div>
+  <a class="made-with" href="https://github.com/Mostlime12195/cupid" target="_blank" rel="noopener"><span aria-hidden="true">♥</span> Runs on Cupid</a>
 </div>
 
 <div id="dialog-bar" role="dialog" aria-labelledby="dialog-title" hidden>
@@ -33,7 +39,7 @@
 </div>
 
 <div id="toolbar" hidden>
-  <button id="btn-fullscreen" title="Fullscreen (F11)">⛶</button>
+  <button id="btn-fullscreen" title="Fullscreen (F11)" aria-label="Fullscreen"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9V5a1 1 0 0 1 1-1h4M15 4h4a1 1 0 0 1 1 1v4M20 15v4a1 1 0 0 1-1 1h-4M9 20H5a1 1 0 0 1-1-1v-4"/></svg></button>
 </div>
 
 <script type="module" src="player.js"></script>

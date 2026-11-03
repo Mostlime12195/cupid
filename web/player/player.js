@@ -32,6 +32,23 @@ const progressEl = $('#overlay-progress');
 const playButton = $('#play-button');
 const filePicker = $('#file-picker');
 
+// The start screen's extras, from the page that shows the game: a poster
+// (same site or https only) and who made it.
+{
+  const poster = params.get('poster');
+  if (poster) {
+    try {
+      const u = new URL(poster, location.href);
+      if (u.origin === location.origin || u.protocol === 'https:') overlay.querySelector('.poster').style.setProperty('--poster', `url("${u.href.replace(/"/g, '%22')}")`);
+    } catch { /* not a URL */ }
+  }
+  const by = params.get('by');
+  if (by) {
+    $('#overlay-by').textContent = `by ${by}`;
+    $('#overlay-by').hidden = false;
+  }
+}
+
 document.body.classList.toggle('embed', embedded);
 document.body.classList.toggle('pixelated', params.get('pixelated') === '1' || scaleMode === 'integer');
 
@@ -76,6 +93,7 @@ function output(level, text) {
 
 function showStatus(text, { progress = null, error = false } = {}) {
   overlay.hidden = false;
+  overlay.classList.remove('ready');
   statusEl.textContent = text;
   statusEl.classList.toggle('error', error);
   const bar = progressEl.parentElement;
@@ -333,7 +351,9 @@ async function onQuit(code) {
   post({ type: 'quit', code });
   if (!embedded) {
     showStatus(code ? `The game exited with code ${code}.` : 'The game has quit.', { progress: false });
-    playButton.textContent = '↻ Restart';
+    playButton.classList.add('again');
+    playButton.setAttribute('aria-label', 'Play again');
+    playButton.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true" style="fill:none;stroke:currentColor;stroke-width:2.4;stroke-linecap:round;stroke-linejoin:round"><path d="M4 12a8 8 0 1 0 2.4-5.7M4 4v4.5h4.5"/></svg>';
     playButton.hidden = false;
     playButton.onclick = () => location.reload();
   }
@@ -366,10 +386,13 @@ async function fetchWithProgress(url) {
 }
 
 function waitForPlay(game, name) {
-  $('#overlay-title').textContent = name || 'LÖVE';
+  const title = params.get('title') || name || 'LÖVE';
+  $('#overlay-title').textContent = title;
+  document.title = title;
   if (autoplay) return start(game);
   engineReady.then(() => {
-    showStatus('Ready', { progress: false });
+    showStatus('', { progress: false });
+    overlay.classList.add('ready');
     playButton.hidden = false;
     playButton.focus();
   });
