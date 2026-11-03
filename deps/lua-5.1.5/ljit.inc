@@ -44,6 +44,10 @@ extern void ljit_release (int index);
 /* Functions compiled / that failed to compile, bytes of wasm generated and
 ** time spent compiling (ours and the browser's), for tests and diagnostics. */
 static int ljit_ncompiled = 0, ljit_nfailed = 0, ljit_ndeopts = 0;
+
+/* The instruction whose speculation failed, stored by compiled code as it
+** deopts (it may resume elsewhere: after a helper, at the next one). */
+static int ljit_blame = 0;
 static double ljit_nbytes = 0, ljit_ms = 0;
 
 EMSCRIPTEN_KEEPALIVE double ljit_stats (int what) {
@@ -749,6 +753,9 @@ static void call_helper (Compiler *cc, int h) {
 ** (LJIT_DEOPT): a speculation failed. The Lua stack is always up to date,
 ** so nothing else needs to be written back. */
 static void deopt (Compiler *cc, int idx) {
+  i32c(cc, (int)(size_t)&ljit_blame);
+  i32c(cc, cc->pcidx);
+  mem(cc, W_I32_STORE, 2, 0);
   i32c(cc, idx);
   lset(cc, V_IDX);
   b_byte(C, W_BR);
@@ -1232,6 +1239,7 @@ static void copy_from_slot (Compiler *cc, int a) {
 ** deeper chain) goes to the helper. */
 static void get_table (Compiler *cc, int a, int table, int key, int self) {
   int strkey = key_kind(cc, key) == KEY_STR;
+  int spec;
   block(cc, W_BLOCK, W_VOID);  /* done */
   block(cc, W_BLOCK, W_VOID);  /* slow */
   if (table < 0) load_env(cc); else load_table_reg(cc, table, 0);
@@ -1256,7 +1264,10 @@ static void get_table (Compiler *cc, int a, int table, int key, int self) {
     return;
   }
   /* A loop (rather than unrolled, which makes much bigger code) over the
-  ** chain of tables, V_R counting the levels left. */
+  ** chain of tables, V_R counting the levels left. When what follows uses
+  ** the result as a number, it is checked to be one (else the interpreter
+  ** reads it again: no metamethod was involved) and kept in a local. */
+  spec = !self && speculative(cc, cc->pcidx);
   i32c(cc, LJIT_INDEX_LEVELS);
   lset(cc, V_R);
   block(cc, W_LOOP, W_VOID);  /* labels: loop 0, slow 1, done 2 */
@@ -1267,7 +1278,16 @@ static void get_table (Compiler *cc, int a, int table, int key, int self) {
   lget(cc, V_S); mem(cc, W_I32_LOAD, 2, TV_TT);
   op(cc, W_I32_EQZ);
   br_if_out(cc, 0);  /* nil */
-  copy_from_slot(cc, a);
+  if (spec) {
+    lget(cc, V_S); mem(cc, W_I32_LOAD, 2, TV_TT);
+    i32c(cc, LUA_TNUMBER); op(cc, W_I32_NE);
+    block(cc, W_IF, W_VOID);
+    deopt(cc, cc->pcidx);
+    end(cc);
+    lget(cc, V_S); mem(cc, W_F64_LOAD, 3, TV_VALUE);
+    def_num(cc, a);
+  }
+  else copy_from_slot(cc, a);
   b_byte(C, W_BR); b_u32(C, 3);  /* done */
   end(cc);
   /* absent: V_TAB = metatable, or the result is nil */
@@ -1275,6 +1295,7 @@ static void get_table (Compiler *cc, int a, int table, int key, int self) {
   ltee(cc, V_TAB);
   op(cc, W_I32_EQZ);
   block(cc, W_IF, W_VOID);
+  if (spec) deopt(cc, cc->pcidx);
   set_nil(cc, a);
   b_byte(C, W_BR); b_u32(C, 3);  /* done */
   end(cc);
@@ -1288,6 +1309,7 @@ static void get_table (Compiler *cc, int a, int table, int key, int self) {
   op(cc, W_I32_EQZ);
   end(cc);
   block(cc, W_IF, W_VOID);
+  if (spec) deopt(cc, cc->pcidx);
   set_nil(cc, a);  /* no __index */
   b_byte(C, W_BR); b_u32(C, 3);  /* done */
   end(cc);
@@ -1482,6 +1504,12 @@ static int speculative (Compiler *cc, int k) {
       return !(ISK(b) && !isk_number(cc, b)) && !(ISK(c) && !isk_number(cc, c));
     case OP_UNM:
       return 1;
+    case OP_GETTABLE: case OP_GETGLOBAL:
+      /* a field read, as a number, by what follows */
+      if (GET_OPCODE(i) == OP_GETGLOBAL ? GETARG_Bx(i) > MAXINDEXRK
+                                        : key_kind(cc, c) != KEY_STR)
+        return 0;
+      return k + 1 < cc->n && rs_has(&cc->uses[k + 1], GETARG_A(i));
     default:
       return 0;
   }
@@ -1595,6 +1623,10 @@ static void known_transfer (Compiler *cc, int k, RegSet *s, int edge,
         if (!ISK(b)) rs_add(s, b);
         if (!ISK(c)) rs_add(s, c);
       }
+      break;
+    case OP_GETTABLE: case OP_GETGLOBAL:
+      if (speculative(cc, k)) rs_add(s, a);
+      else rs_del(s, a);
       break;
     case OP_CALL: case OP_TAILCALL: case OP_VARARG: case OP_TFORLOOP:
       rs_delfrom(s, a);
@@ -2299,7 +2331,7 @@ void ljit_note (Proto *p, int k) {
 void ljit_deopt (lua_State *L) {
   Proto *p = clvalue(L->ci->func)->l.p;
   ljit_ndeopts++;
-  ljit_note(p, cast_int(L->savedpc - p->code));
+  ljit_note(p, ljit_blame);
   p->jitdeopts++;
   if (p->jit > 0) {
     ljit_release(p->jit);

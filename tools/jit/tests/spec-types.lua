@@ -156,3 +156,32 @@ for round = 1, 40 do
   out[#out + 1] = tostring(r)
 end
 print(table.concat(out, ","))
+
+-- Field reads used as numbers are checked at the read: fields that turn
+-- into strings, nil, tables with __add, and come through __index (tables
+-- and functions).
+local Vec = setmetatable({}, { __add = function(a, b) return 0.25 end,
+                               __mul = function(a, b) return 0.5 end })
+local Base = { w = 2 }
+local P = setmetatable({}, { __index = Base })
+P.__index = P
+local function weigh(objs)
+  local s = 0
+  for i = 1, #objs do
+    local o = objs[i]
+    s = s + o.x * o.w + GLOBAL_SCALE
+  end
+  return s
+end
+GLOBAL_SCALE = 1
+local objs = {}
+for i = 1, 100 do objs[i] = setmetatable({ x = i }, P) end
+print(weigh(objs))
+objs[40].x = "3"; print(pcall(weigh, objs))
+objs[40].x = Vec; print(pcall(weigh, objs))
+objs[40].x = nil; print(pcall(weigh, objs))
+objs[40].x = 40; Base.w = "2"; print(pcall(weigh, objs))
+Base.w = nil; P.__index = function(t, k) return k == "w" and 0.5 or nil end; print(pcall(weigh, objs))
+P.__index = Base; Base.w = 2; GLOBAL_SCALE = "1"; print(pcall(weigh, objs))
+GLOBAL_SCALE = nil; print(pcall(weigh, objs))
+GLOBAL_SCALE = 1; print(weigh(objs))
