@@ -475,7 +475,8 @@ function showSplash(splash) {
   splashImage.hidden = !splash.imageUrl;
   if (splash.imageUrl) splashImage.src = splash.imageUrl;
   splashImage.classList.toggle('pixel', !!splash.pixel);
-  splashMark.hidden = !!splash.imageUrl || !splash.madeWith;
+  // An SVG element has no hidden property, so set the attribute itself.
+  splashMark.toggleAttribute('hidden', !!splash.imageUrl || !splash.madeWith);
   splashCaption.hidden = !splash.madeWith;
   overlay.classList.remove('message');
   overlay.hidden = false;
