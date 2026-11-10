@@ -33,6 +33,11 @@
 #include <arm_neon.h>
 #endif
 
+#if defined(__wasm_simd128__) && !defined(LOVE_SIMD_SSE)
+#include <wasm_simd128.h>
+#define LOVE_SIMD_WASM
+#endif
+
 namespace love
 {
 
@@ -102,6 +107,28 @@ void Matrix4::multiply(const Matrix4 &a, const Matrix4 &b, float t[16])
 	vst1q_f32(&t[4], col2);
 	vst1q_f32(&t[8], col3);
 	vst1q_f32(&t[12], col4);
+
+#elif defined(LOVE_SIMD_WASM)
+
+	// WebAssembly SIMD. The sums are in the scalar code's order, so the
+	// results are the same as without it.
+	v128_t col1 = wasm_v128_load(&a.e[0]);
+	v128_t col2 = wasm_v128_load(&a.e[4]);
+	v128_t col3 = wasm_v128_load(&a.e[8]);
+	v128_t col4 = wasm_v128_load(&a.e[12]);
+
+	v128_t out[4];
+	for (int i = 0; i < 4; i++)
+	{
+		v128_t col = wasm_f32x4_mul(col1, wasm_f32x4_splat(b.e[4*i + 0]));
+		col = wasm_f32x4_add(col, wasm_f32x4_mul(col2, wasm_f32x4_splat(b.e[4*i + 1])));
+		col = wasm_f32x4_add(col, wasm_f32x4_mul(col3, wasm_f32x4_splat(b.e[4*i + 2])));
+		col = wasm_f32x4_add(col, wasm_f32x4_mul(col4, wasm_f32x4_splat(b.e[4*i + 3])));
+		out[i] = col;
+	}
+
+	for (int i = 0; i < 4; i++)
+		wasm_v128_store(&t[4*i], out[i]);
 
 #else
 
@@ -265,7 +292,13 @@ void Matrix4::setRawTransformation(float t00, float t10, float t01, float t11, f
 void Matrix4::setTransformation(float x, float y, float angle, float sx, float sy, float ox, float oy, float kx, float ky)
 {
 	memset(e, 0, sizeof(float)*16); // zero out matrix
-	float c = cosf(angle), s = sinf(angle);
+	// Most things are drawn unrotated: cos(0) and sin(0) without the calls.
+	float c = 1.0f, s = 0.0f;
+	if (angle != 0.0f)
+	{
+		c = cosf(angle);
+		s = sinf(angle);
+	}
 	// matrix multiplication carried out on paper:
 	// |1     x| |c -s    | |sx       | | 1 ky    | |1     -ox|
 	// |  1   y| |s  c    | |   sy    | |kx  1    | |  1   -oy|
