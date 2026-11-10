@@ -1,9 +1,16 @@
 // Runs games in the embedded player (player.html?embed=1).
 //
-// Every run gets a fresh iframe, i.e. a fresh engine instance. The browser
-// caches love.wasm, so this is quick. Messages from stale iframes are ignored.
+// Every run gets a fresh iframe, i.e. a fresh engine instance. So that Run
+// doesn't wait for the page and the engine to load, the next one is made
+// ahead of time and kept hidden (the "spare"); a run shows it and sends it
+// the game. Messages from stale iframes are ignored.
 
 const PLAYER_URL = 'player.html?embed=1';
+
+function playerUrl(query = {}) {
+  const extra = new URLSearchParams(query).toString();
+  return extra ? `${PLAYER_URL}&${extra}` : PLAYER_URL;
+}
 
 export class Runner {
   /**
@@ -19,7 +26,48 @@ export class Runner {
     this.paused = false;
     this.stopTimer = 0;
     this.runId = 0;
+    this.spare = null; // {frame, src, ready}
+    this.spareTimer = 0;
+    this.src = PLAYER_URL;
     window.addEventListener('message', (e) => this.onMessage(e));
+  }
+
+  newFrame(src) {
+    const frame = document.createElement('iframe');
+    frame.className = 'game-frame';
+    frame.title = 'Game';
+    frame.setAttribute('allow', 'autoplay; fullscreen; gamepad; clipboard-read; clipboard-write');
+    frame.src = src;
+    frame.addEventListener('load', () => this.hookKeys(frame));
+    return frame;
+  }
+
+  /**
+   * Loads the player for the next run, hidden, once the page has been idle
+   * for a moment. query: as for run(); defaults to the last run's.
+   */
+  prepare(query) {
+    if (query) this.src = playerUrl(query);
+    clearTimeout(this.spareTimer);
+    this.spareTimer = setTimeout(() => {
+      const make = () => {
+        if (document.hidden || this.spare?.src === this.src) return;
+        this.dropSpare();
+        const frame = this.newFrame(this.src);
+        frame.classList.add('spare');
+        frame.setAttribute('aria-hidden', 'true');
+        frame.tabIndex = -1;
+        this.spare = { frame, src: this.src, ready: false };
+        this.host.append(frame);
+      };
+      if (window.requestIdleCallback) requestIdleCallback(make, { timeout: 3000 });
+      else make();
+    }, 1500);
+  }
+
+  dropSpare() {
+    this.spare?.frame.remove();
+    this.spare = null;
   }
 
   setState(state) {
@@ -35,20 +83,36 @@ export class Runner {
   /** query: extra player.html parameters, e.g. {scale: 'integer', jit: '0'} */
   run(game, { focus = true, query = {} } = {}) {
     this.destroy();
+    clearTimeout(this.spareTimer);
     this.focusOnStart = focus;
     this.runId++;
-    const frame = document.createElement('iframe');
-    frame.className = 'game-frame';
-    frame.title = 'Game';
-    frame.setAttribute('allow', 'autoplay; fullscreen; gamepad; clipboard-read; clipboard-write');
-    const extra = new URLSearchParams(query).toString();
-    frame.src = extra ? `${PLAYER_URL}&${extra}` : PLAYER_URL;
-    frame.addEventListener('load', () => this.hookKeys(frame));
-    this.frame = frame;
-    this.pending = game;
+    this.src = playerUrl(query);
     this.paused = false;
-    this.host.append(frame);
+    const spare = this.spare;
+    this.spare = null;
+    if (spare && spare.src === this.src) {
+      // Loaded ahead of time (it reads the saved files when it gets the game).
+      spare.frame.classList.remove('spare');
+      spare.frame.removeAttribute('aria-hidden');
+      spare.frame.removeAttribute('tabindex');
+      this.frame = spare.frame;
+      this.pending = game;
+      this.setState('loading');
+      if (spare.ready) this.send();
+      return;
+    }
+    spare?.frame.remove();
+    this.frame = this.newFrame(this.src);
+    this.pending = game;
+    this.host.append(this.frame);
     this.setState('loading');
+  }
+
+  /** Sends the waiting game to the player, which has said it is ready. */
+  send() {
+    const game = this.pending;
+    this.pending = null;
+    if (game) this.post({ type: 'run', ...game });
   }
 
   post(msg) {
@@ -56,20 +120,22 @@ export class Runner {
   }
 
   onMessage(e) {
-    if (!this.frame || e.source !== this.frame.contentWindow) return;
     const msg = e.data;
     if (!msg || msg.source !== 'love-player') return;
+    if (this.spare && e.source === this.spare.frame.contentWindow) {
+      if (msg.type === 'ready') this.spare.ready = true;
+      else if (msg.type === 'error') this.dropSpare(); // a run will load it again and report this
+      return;
+    }
+    if (!this.frame || e.source !== this.frame.contentWindow) return;
     switch (msg.type) {
       case 'ready':
-        if (this.pending) {
-          const game = this.pending;
-          this.pending = null;
-          this.post({ type: 'run', ...game });
-        }
+        this.send();
         break;
       case 'started':
         this.setState('running');
         if (this.focusOnStart) this.focus();
+        this.prepare();
         break;
       case 'log':
         this.handlers.onLog?.(msg.level, msg.text);

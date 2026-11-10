@@ -696,6 +696,8 @@ kbd {
 #game-stage .empty-state { background: var(--game-bg); color: #a1a1aa; gap: 12px; }
 #game-stage .empty-state kbd { background: #27272a; border-color: #3a3a40; color: #d4d4d8; }
 .game-frame { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; display: block; background: #000; }
+/* The player for the next run, loaded ahead of time (runner.js). */
+.game-frame.spare { visibility: hidden; pointer-events: none; }
 #game-stage:fullscreen { background: #000; }
 #game-stage .loading-state { background: var(--game-bg); color: #a1a1aa; }
 #game-stage .spinner { border-color: #3a3a40; border-top-color: #d4d4d8; }

@@ -216,7 +216,7 @@ for (const type of ['keydown', 'keyup', 'keypress']) {
 
 let Module = null;
 let running = false;
-let syncing = false;
+let syncing = null;
 
 // Combined download progress of the engine and the game.
 const downloads = { engine: [0, 0], game: [0, 0] };
@@ -279,16 +279,19 @@ const engineReady = createLove({
   throw e;
 });
 
+// populate: read the saved files from IndexedDB (otherwise write them to it).
 function syncSaves(populate = false) {
-  if (!Module || syncing) return Promise.resolve();
-  syncing = true;
-  return new Promise((resolve) => {
+  if (!Module) return Promise.resolve();
+  // One at a time. Reading waits its turn; a write is covered by the one running.
+  if (syncing) return populate ? syncing.then(() => syncSaves(true)) : syncing;
+  syncing = new Promise((resolve) => {
     Module.FS.syncfs(populate, (err) => {
-      syncing = false;
+      syncing = null;
       if (err) console.warn('Save data sync failed:', err);
       resolve();
     });
   });
+  return syncing;
 }
 
 function mkdirp(FS, path) {
@@ -314,8 +317,11 @@ async function mountSaves(M) {
 }
 
 // Load save data from IndexedDB as soon as the engine is ready, so it's done
-// by the time the player presses Play.
-const savesReady = engineReady.then(mountSaves);
+// by the time the game starts. An embedded player does it when it is given
+// a game instead: it may have been loaded long before (the editor keeps one
+// ready for the next run), and until then it must neither hold an old copy
+// of the saves nor write one back.
+let savesReady = embedded ? null : engineReady.then(mountSaves);
 
 function writeFiles(M, files) {
   for (const [rawPath, data] of Object.entries(files)) {
@@ -330,7 +336,7 @@ async function start(game) {
   if (running) return;
   if (embedded) showStatus('Starting…', { progress: null });
   const M = await engineReady;
-  await savesReady;
+  await (savesReady ||= mountSaves(M));
 
   let arg;
   if (game.love) {

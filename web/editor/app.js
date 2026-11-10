@@ -94,6 +94,7 @@ async function init() {
 
   wireUi();
   loadApi();
+  runner.prepare(runQuery()); // the engine loads while the editor does
 
   editor = await createEditor($('#editor-host'), {
     onChange: onEditorChange,
@@ -863,6 +864,14 @@ function showProblems() {
   openPicker({ placeholder: 'Go to a web compatibility issue', items, emptyText: 'No issues' });
 }
 
+/** The player options that come from the settings. */
+function runQuery() {
+  const query = {};
+  if (settings.get('scaleMode') !== 'fit') query.scale = settings.get('scaleMode');
+  if (!settings.get('jit')) query.jit = '0';
+  return query;
+}
+
 /** focus: give the game keyboard focus once it starts (not for auto-run). */
 async function run({ focus = settings.get('focusGameOnRun') } = {}) {
   if (!state.project) return;
@@ -880,10 +889,7 @@ async function run({ focus = settings.get('focusGameOnRun') } = {}) {
   state.hasRun = true;
   renderTabs();
   $('#game-title').textContent = state.project.name;
-  const query = {};
-  if (settings.get('scaleMode') !== 'fit') query.scale = settings.get('scaleMode');
-  if (!settings.get('jit')) query.jit = '0';
-  runner.run({ files }, { focus, query });
+  runner.run({ files }, { focus, query: runQuery() });
   if (settings.get('compatCheck')) reportCompat(files);
   else setProblems([]);
 }
