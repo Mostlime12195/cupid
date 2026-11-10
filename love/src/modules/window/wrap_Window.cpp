@@ -229,6 +229,10 @@ int w_getMode(lua_State *L)
 	lua_pushinteger(L, settings.displayindex + 1);
 	lua_setfield(L, -2, settingName(Window::SETTING_DISPLAYINDEX));
 
+	// LÖVE 11 name of the same field. Games written for 11 read flags.display.
+	lua_pushinteger(L, settings.displayindex + 1);
+	lua_setfield(L, -2, settingName(Window::SETTING_DISPLAY));
+
 	luax_pushboolean(L, settings.usedpiscale);
 	lua_setfield(L, -2, settingName(Window::SETTING_USE_DPISCALE));
 

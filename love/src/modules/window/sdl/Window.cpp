@@ -964,6 +964,16 @@ std::vector<Window::DisplayMode> Window::getFullscreenModes(int displayindex) co
 
 	SDL_free(modes);
 
+	// Browsers have no fullscreen mode list, so SDL returns none. LÖVE 11
+	// games (for example ones that list resolutions in their options) expect
+	// at least one entry, so give the desktop size.
+	if (sizes.empty())
+	{
+		const SDL_DisplayMode *dmode = SDL_GetDesktopDisplayMode(GetSDLDisplayIDForIndex(displayindex));
+		if (dmode != nullptr && dmode->w > 0 && dmode->h > 0)
+			sizes.push_back({dmode->w, dmode->h, (double)dmode->refresh_rate});
+	}
+
 	return sizes;
 }
 
