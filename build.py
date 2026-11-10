@@ -267,9 +267,10 @@ def copy_web():
         src = WEB / sub
         if src.exists():
             shutil.copytree(src, DIST, dirs_exist_ok=True)
-    player = DIST / "player.js"
-    if player.exists():
-        player.write_text(player.read_text().replace("__LOVE_BUILD__", build_id()))
+    for name in ("player.js", "player.html"):
+        player = DIST / name
+        if player.exists():
+            player.write_text(player.read_text().replace("__LOVE_BUILD__", build_id()))
     if (WEB / "examples").exists():
         shutil.copytree(WEB / "examples", DIST / "examples", dirs_exist_ok=True)
 

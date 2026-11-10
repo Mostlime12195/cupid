@@ -12,6 +12,10 @@
 // build.py replaces this with a hash of the engine files, so browsers never
 // combine a cached love.wasm with a newer love.mjs (or vice versa).
 const BUILD = '__LOVE_BUILD__';
+// The engine starts downloading now, alongside its JavaScript, instead of
+// after that has loaded and run.
+const engineResponse = fetch(new URL(`love.wasm?v=${BUILD}`, import.meta.url));
+engineResponse.catch(() => {});  // reported by instantiateEngine
 const { default: createLove } = await import(`./love.mjs?v=${BUILD}`);
 
 const SAVE_ROOT = '/home/web_user/.local/share/love';
@@ -231,20 +235,28 @@ function bodySize(res) {
   return res.headers.get('content-encoding') ? 0 : Number(res.headers.get('content-length')) || 0;
 }
 
-// Downloads the engine with progress, compiling it while it streams in.
+// Counts a response's bytes as they arrive, for the progress bar.
+async function countDownload(res) {
+  try {
+    const reader = res.body.getReader();
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      downloads.engine[0] += value.length;
+      showDownloadProgress();
+    }
+  } catch { /* the engine's own read reports the failure */ }
+}
+
+// Compiles the engine while it streams in. The browser gets the response
+// from the network itself (progress is counted on a copy): browsers only
+// keep compiled code for next time when it comes from such a response.
 function instantiateEngine(imports, done) {
-  fetch(new URL(`love.wasm?v=${BUILD}`, import.meta.url)).then((res) => {
+  engineResponse.then((res) => {
     if (!res.ok) throw new Error(`love.wasm: ${res.status} ${res.statusText}`);
     downloads.engine[1] = bodySize(res);
-    const counted = res.body.pipeThrough(new TransformStream({
-      transform(chunk, controller) {
-        downloads.engine[0] += chunk.length;
-        showDownloadProgress();
-        controller.enqueue(chunk);
-      },
-    }));
-    const wasm = new Response(counted, { headers: { 'Content-Type': 'application/wasm' } });
-    return WebAssembly.instantiateStreaming(wasm, imports);
+    if (res.body) countDownload(res.clone());
+    return WebAssembly.instantiateStreaming(res, imports);
   }).then(({ instance, module }) => done(instance, module))
     .catch((e) => fail(`Could not load the LÖVE engine.\n${e?.message || e}`));
   return {};
@@ -290,12 +302,13 @@ function mkdirp(FS, path) {
 async function mountSaves(M) {
   mkdirp(M.FS, SAVE_ROOT);
   try {
-    M.FS.mount(M.IDBFS, {}, SAVE_ROOT);
+    // Saves are written to IndexedDB when a file changes (and below, when
+    // the tab is hidden or the game quits), not by polling.
+    M.FS.mount(M.IDBFS, { autoPersist: true }, SAVE_ROOT);
     await syncSaves(true);
   } catch (e) {
     console.warn('Persistent saves unavailable:', e);
   }
-  setInterval(() => running && syncSaves(false), 2000);
   document.addEventListener('visibilitychange', () => document.hidden && syncSaves(false));
   window.addEventListener('pagehide', () => syncSaves(false));
 }
@@ -321,7 +334,9 @@ async function start(game) {
 
   let arg;
   if (game.love) {
-    M.FS.writeFile(GAME_FILE, new Uint8Array(game.love));
+    // The file system keeps these bytes as they are instead of copying them.
+    const love = game.love instanceof Uint8Array ? game.love : new Uint8Array(game.love);
+    M.FS.writeFile(GAME_FILE, love, { canOwn: true });
     arg = GAME_FILE;
   } else {
     mkdirp(M.FS, GAME_DIR);

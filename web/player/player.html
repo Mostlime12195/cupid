@@ -6,6 +6,10 @@
 <title>Cupid Player</title>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>❤</text></svg>">
 <link rel="stylesheet" href="player.css">
+<!-- The engine's JavaScript downloads while player.js does. love.wasm isn't
+     preloaded here: Chromium doesn't keep compiled code for a preloaded
+     response, so player.js fetches it as soon as it runs. -->
+<link rel="modulepreload" href="love.mjs?v=__LOVE_BUILD__">
 </head>
 <body>
 <div id="stage">

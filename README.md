@@ -372,7 +372,7 @@ Player URL options:
 ## Web-specific behavior
 
 - `love.system.getOS()` returns `"Web"`.
-- Save files live in IndexedDB and are flushed every 2 seconds, when the tab
+- Save files live in IndexedDB and are written when a file is saved, when the tab
   is hidden, and when the game quits.
 - `love.timer.sleep` on the main thread doesn't block (it lets threads run instead).
 - Text input is enabled by default, as on desktop, except on touch devices
