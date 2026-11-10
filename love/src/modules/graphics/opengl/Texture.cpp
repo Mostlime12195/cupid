@@ -379,7 +379,9 @@ bool Texture::loadVolatile()
 
 	actualSamples = std::max(1, std::min(getRequestedMSAA(), gl.getMaxSamples()));
 
+#ifndef LOVE_EMSCRIPTEN
 	while (glGetError() != GL_NO_ERROR); // Clear errors.
+#endif
 
 	framebufferStatus = GL_FRAMEBUFFER_COMPLETE;
 	textureGLError = GL_NO_ERROR;
@@ -390,7 +392,13 @@ bool Texture::loadVolatile()
 	if (framebufferStatus == GL_FRAMEBUFFER_COMPLETE && (!isReadable() || actualSamples > 1))
 		framebufferStatus = newRenderbuffer(pixelWidth, pixelHeight, actualSamples, format, renderbuffer);
 
+#ifndef LOVE_EMSCRIPTEN
+	// Not on the web: asking WebGL for errors waits for the GPU process to
+	// run everything sent so far, twice for every texture created. The
+	// size and format were checked before this, and a browser that runs
+	// out of video memory loses the WebGL context rather than report it.
 	textureGLError = glGetError();
+#endif
 
 	if (framebufferStatus != GL_FRAMEBUFFER_COMPLETE || textureGLError != GL_NO_ERROR)
 	{
