@@ -247,6 +247,10 @@ compiles that to machine code like any other wasm.
   interpreter's own code, so behavior (including error messages) is
   identical.
 - Compiled functions call other compiled functions directly, up to 64 deep.
+- Calls of `math.floor`, `ceil`, `sqrt` and `abs` with one number, and of
+  `math.min` and `max` with two, become single WebAssembly instructions
+  (after checking that the function called really is that one), also
+  through `local floor = math.floor`.
 - Frames with a line or count hook are interpreted, so `debug.sethook` and
   `love.thread`'s scheduler work unchanged.
 - `?jit=0` on the player turns it off.
@@ -323,8 +327,9 @@ uploaded anywhere.
 - Examples: platformer, particles, shaders, physics, text input, canvas and blend modes, synth
 - Works on narrow screens
 
-The editor loads CodeMirror from esm.sh, so the first load needs an internet
-connection (it falls back to a plain text area if that fails).
+CodeMirror is bundled with the editor (`web/editor/vendor/codemirror.js`,
+rebuilt with `web/editor/tools/bundle-codemirror.sh`), so the editor loads
+from its own host.
 
 ## Publishing a game
 

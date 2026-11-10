@@ -1,5 +1,5 @@
-// The code editor: CodeMirror 6 (loaded from esm.sh through the import map
-// in index.html), or a plain <textarea> when the CDN can't be reached.
+// The code editor: CodeMirror 6 (vendor/codemirror.js, one file with all of
+// its packages), or a plain <textarea> if that can't be loaded.
 //
 // Both implementations share one interface:
 //   open(path, text)  show a file (creates its buffer the first time)
@@ -12,20 +12,9 @@ import { h } from './ui.js';
 import { languageOf } from './file-types.js';
 
 export async function loadCodeMirror(timeoutMs = 15000) {
-  const modules = Promise.all([
-    import('@codemirror/state'),
-    import('@codemirror/view'),
-    import('@codemirror/language'),
-    import('@codemirror/commands'),
-    import('@codemirror/search'),
-    import('@codemirror/autocomplete'),
-    import('@lezer/highlight'),
-    import('@codemirror/legacy-modes/mode/lua'),
-    import('@codemirror/legacy-modes/mode/clike'),
-    import('@codemirror/legacy-modes/mode/javascript'),
-  ]);
+  const modules = import('./vendor/codemirror.js');
   const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error('Timed out loading CodeMirror')), timeoutMs));
-  const [state, view, language, commands, search, autocomplete, highlight, lua, clike, javascript] = await Promise.race([modules, timeout]);
+  const { state, view, language, commands, search, autocomplete, highlight, lua, clike, javascript } = await Promise.race([modules, timeout]);
   return { state, view, language, commands, search, autocomplete, highlight, modes: { lua, clike, javascript } };
 }
 
@@ -381,7 +370,7 @@ class TextareaEditor {
     this.texts = new Map();
     this.current = null;
     this.wrap = h('div', { class: 'fallback-wrap', hidden: true });
-    this.notice = h('div', { class: 'fallback-notice' }, 'The code editor could not be loaded from the CDN, so this is a plain text editor. Running, saving and exporting still work.');
+    this.notice = h('div', { class: 'fallback-notice' }, 'The code editor could not be loaded, so this is a plain text editor. Running, saving and exporting still work.');
     this.errorBar = h('button', { type: 'button', class: 'fallback-error', hidden: true });
     this.ta = h('textarea', {
       class: 'fallback-editor', spellcheck: 'false', autocapitalize: 'off', autocomplete: 'off', wrap: 'off', 'aria-label': 'Code editor',
