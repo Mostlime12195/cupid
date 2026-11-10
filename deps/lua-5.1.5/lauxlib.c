@@ -24,6 +24,9 @@
 
 #include "lauxlib.h"
 
+#include "lobject.h"
+#include "lstate.h"
+
 
 #define FREELIST_REF	0	/* free list of references */
 
@@ -173,8 +176,18 @@ LUALIB_API const char *luaL_optlstring (lua_State *L, int narg,
 }
 
 
+/* LÖVE web: an argument that is a number (nearly every one) is read
+** straight from the stack, without the calls below. */
+#define arg_number(L,narg) \
+  if ((narg) > 0) { \
+    const TValue *o_ = (L)->base + ((narg) - 1); \
+    if (o_ < (L)->top && ttisnumber(o_)) return nvalue(o_); \
+  }
+
 LUALIB_API lua_Number luaL_checknumber (lua_State *L, int narg) {
-  lua_Number d = lua_tonumber(L, narg);
+  lua_Number d;
+  arg_number(L, narg)
+  d = lua_tonumber(L, narg);
   if (d == 0 && !lua_isnumber(L, narg))  /* avoid extra test when d is not 0 */
     tag_error(L, narg, LUA_TNUMBER);
   return d;
@@ -182,6 +195,7 @@ LUALIB_API lua_Number luaL_checknumber (lua_State *L, int narg) {
 
 
 LUALIB_API lua_Number luaL_optnumber (lua_State *L, int narg, lua_Number def) {
+  arg_number(L, narg)
   return luaL_opt(L, luaL_checknumber, narg, def);
 }
 
@@ -624,6 +638,111 @@ LUALIB_API int (luaL_loadstring) (lua_State *L, const char *s) {
 /* }====================================================== */
 
 
+/* Define as 0 to give every allocation to malloc, as stock Lua does. */
+#ifndef LUAI_POOL
+#define LUAI_POOL	1
+#endif
+
+#if LUAI_POOL
+
+/*
+** LÖVE web: Lua's small objects (tables, closures, strings, upvalues) come
+** from per-size free lists instead of malloc and free, which Lua code that
+** creates many short-lived objects spends much of its time in. Blocks of
+** up to POOL_MAX bytes are cut from chunks, in size classes POOL_ALIGN
+** bytes apart;
+** a freed block is the next one handed out for its class. Larger blocks
+** (the Lua stack, big arrays and strings) still use malloc. Each Lua state
+** has its own pool, which goes back to malloc with the state.
+*/
+#define POOL_MAX	320  /* a Table and 8 nodes, the largest that share a block (ltable.c) */
+#ifndef POOL_ALIGN
+#define POOL_ALIGN	16  /* a TValue (16 bytes) is never split between cache lines */
+#endif
+#define POOL_CLASSES	(POOL_MAX / POOL_ALIGN)
+#define POOL_CHUNK	(64 * 1024)
+#define pool_class(n)	(((n) - 1) / POOL_ALIGN)
+
+typedef struct PoolChunk {
+  struct PoolChunk *next;
+} PoolChunk;
+
+typedef struct Pool {
+  void *free[POOL_CLASSES];
+  char *cur, *end;  /* unused part of the newest chunk */
+  PoolChunk *chunks;
+  size_t live;  /* blocks in use, of any size */
+} Pool;
+
+static void *pool_get (Pool *p, size_t n) {
+  size_t c = pool_class(n);
+  size_t size = (c + 1) * POOL_ALIGN;
+  void *b = p->free[c];
+  if (b != NULL) {
+    p->free[c] = *(void **)b;
+    return b;
+  }
+  if ((size_t)(p->end - p->cur) < size) {
+    PoolChunk *chunk = (PoolChunk *)malloc(POOL_CHUNK);
+    if (chunk == NULL) return NULL;
+    chunk->next = p->chunks;
+    p->chunks = chunk;
+    p->cur = (char *)chunk + POOL_ALIGN;  /* past the header, */
+    p->cur += (POOL_ALIGN - (size_t)p->cur % POOL_ALIGN) % POOL_ALIGN;  /* aligned */
+    p->end = (char *)chunk + POOL_CHUNK;
+  }
+  b = p->cur;
+  p->cur += size;
+  return b;
+}
+
+static void pool_put (Pool *p, void *b, size_t n) {
+  size_t c = pool_class(n);
+  *(void **)b = p->free[c];
+  p->free[c] = b;
+}
+
+static void pool_destroy (Pool *p) {
+  PoolChunk *chunk = p->chunks;
+  while (chunk != NULL) {
+    PoolChunk *next = chunk->next;
+    free(chunk);
+    chunk = next;
+  }
+  free(p);
+}
+
+static void *l_alloc (void *ud, void *ptr, size_t osize, size_t nsize) {
+  Pool *p = (Pool *)ud;
+  void *b;
+  if (nsize == 0) {
+    if (ptr != NULL) {
+      if (osize <= POOL_MAX) pool_put(p, ptr, osize);
+      else free(ptr);
+      if (--p->live == 0) pool_destroy(p);  /* the state itself was freed */
+    }
+    return NULL;
+  }
+  if (ptr == NULL) {
+    b = nsize <= POOL_MAX ? pool_get(p, nsize) : malloc(nsize);
+    if (b != NULL) p->live++;
+    return b;
+  }
+  if (osize > POOL_MAX && nsize > POOL_MAX)
+    return realloc(ptr, nsize);
+  if (osize <= POOL_MAX && nsize <= POOL_MAX && pool_class(osize) == pool_class(nsize))
+    return ptr;
+  b = nsize <= POOL_MAX ? pool_get(p, nsize) : malloc(nsize);
+  if (b == NULL) return NULL;
+  memcpy(b, ptr, osize < nsize ? osize : nsize);
+  if (osize <= POOL_MAX) pool_put(p, ptr, osize);
+  else free(ptr);
+  return b;
+}
+
+
+#else
+
 static void *l_alloc (void *ud, void *ptr, size_t osize, size_t nsize) {
   (void)ud;
   (void)osize;
@@ -635,6 +754,8 @@ static void *l_alloc (void *ud, void *ptr, size_t osize, size_t nsize) {
     return realloc(ptr, nsize);
 }
 
+#endif
+
 
 static int panic (lua_State *L) {
   (void)L;  /* to avoid warnings */
@@ -644,9 +765,30 @@ static int panic (lua_State *L) {
 }
 
 
+#if LUAI_POOL
+
+LUALIB_API lua_State *luaL_newstate (void) {
+  lua_State *L;
+  Pool *p = (Pool *)calloc(1, sizeof(Pool));
+  if (p == NULL) return NULL;
+  p->live = 1;  /* so a failed lua_newstate, which frees all it made, leaves the pool to us */
+  L = lua_newstate(l_alloc, p);
+  if (L == NULL) {
+    pool_destroy(p);
+    return NULL;
+  }
+  p->live--;
+  lua_atpanic(L, &panic);
+  return L;
+}
+
+#else
+
 LUALIB_API lua_State *luaL_newstate (void) {
   lua_State *L = lua_newstate(l_alloc, NULL);
   if (L) lua_atpanic(L, &panic);
   return L;
 }
+
+#endif
 

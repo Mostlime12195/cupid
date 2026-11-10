@@ -297,15 +297,65 @@ static void setnodevector (lua_State *L, Table *t, int size) {
 }
 
 
+/*
+** LÖVE web: a table created with a few hash entries ({x = 1, y = 2}, which
+** is most objects) gets its nodes in the same block as the Table itself,
+** right after it: one allocation instead of two, and the nodes are next to
+** the header in memory. INLINEBIT in `marked' (unused by the collector)
+** says the block has that space. If the table outgrows it, the nodes move
+** to a block of their own as usual and the space stays unused; its size,
+** needed to free the block, is then kept in its first byte.
+** LUAI_INLINENODES must be a power of 2.
+*/
+#ifndef LUAI_INLINENODES
+#define LUAI_INLINENODES	8  /* most hash entries kept inline; 0: never */
+#endif
+
+#define INLINEBIT	7
+#define inlinenodes(t)	cast(Node *, (t) + 1)
+typedef char ltable_check_inline[sizeof(Table) % 8 == 0 ? 1 : -1];
+
+/* log2 of the number of nodes the table's block has room for */
+static int inlinelsize (const Table *t) {
+  return (t->node == inlinenodes(t)) ? t->lsizenode
+                                     : *cast(const lu_byte *, inlinenodes(t));
+}
+
+static void initnodes (Table *t, int lsize) {
+  int i, size = twoto(lsize);
+  for (i=0; i<size; i++) {
+    Node *n = gnode(t, i);
+    gnext(n) = NULL;
+    setnilvalue(gkey(n));
+    setnilvalue(gval(n));
+  }
+  t->lsizenode = cast_byte(lsize);
+  t->lastfree = gnode(t, size);  /* all positions are free */
+}
+
+
 static void resize (lua_State *L, Table *t, int nasize, int nhsize) {
   int i;
   int oldasize = t->sizearray;
   int oldhsize = t->lsizenode;
   Node *nold = t->node;  /* save old hash ... */
+#if LUAI_INLINENODES > 0
+  Node inlcopy[LUAI_INLINENODES];
+#endif
   if (nasize > oldasize)  /* array part must grow? */
     setarrayvector(L, t, nasize);
   /* create new hash part with appropriate size */
   setnodevector(L, t, nhsize);  
+#if LUAI_INLINENODES > 0
+  if (testbit(t->marked, INLINEBIT) && nold == inlinenodes(t)) {
+    /* The nodes were in the table's block: that space is now unused, and
+    ** remembers its size (see inlinelsize). Nothing between the line above
+    ** and here can raise an error, so the block's size is always known. */
+    memcpy(inlcopy, nold, twoto(oldhsize) * sizeof(Node));
+    *cast(lu_byte *, nold) = cast_byte(oldhsize);
+    nold = inlcopy;
+  }
+#endif
   if (nasize < oldasize) {  /* array part must shrink? */
     t->sizearray = nasize;
     /* re-insert elements from vanishing slice */
@@ -322,6 +372,9 @@ static void resize (lua_State *L, Table *t, int nasize, int nhsize) {
     if (!ttisnil(gval(old)))
       setobjt2t(L, luaH_set(L, t, key2tval(old)), gval(old));
   }
+#if LUAI_INLINENODES > 0
+  if (nold == inlcopy) return;
+#endif
   if (nold != dummynode)
     luaM_freearray(L, nold, twoto(oldhsize), Node);  /* free old array */
 }
@@ -359,7 +412,14 @@ static void rehash (lua_State *L, Table *t, const TValue *ek) {
 
 
 Table *luaH_new (lua_State *L, int narray, int nhash) {
-  Table *t = luaM_new(L, Table);
+  Table *t;
+  int inlsize = -1;  /* log2 of the nodes kept in the table's block */
+  if (nhash > 0 && nhash <= LUAI_INLINENODES) {
+    inlsize = ceillog2(nhash);
+    t = cast(Table *, luaM_malloc(L, sizeof(Table) + twoto(inlsize) * sizeof(Node)));
+  }
+  else
+    t = luaM_new(L, Table);
   luaC_link(L, obj2gco(t), LUA_TTABLE);
   t->metatable = NULL;
   t->flags = cast_byte(~0);
@@ -368,17 +428,28 @@ Table *luaH_new (lua_State *L, int narray, int nhash) {
   t->sizearray = 0;
   t->lsizenode = 0;
   t->node = cast(Node *, dummynode);
-  setarrayvector(L, t, narray);
-  setnodevector(L, t, nhash);
+  if (inlsize >= 0) {
+    l_setbit(t->marked, INLINEBIT);
+    t->node = inlinenodes(t);
+    initnodes(t, inlsize);
+    setarrayvector(L, t, narray);
+  }
+  else {
+    setarrayvector(L, t, narray);
+    setnodevector(L, t, nhash);
+  }
   return t;
 }
 
 
 void luaH_free (lua_State *L, Table *t) {
-  if (t->node != dummynode)
+  size_t size = sizeof(Table);
+  if (testbit(t->marked, INLINEBIT))
+    size += twoto(inlinelsize(t)) * sizeof(Node);
+  if (t->node != dummynode && !(testbit(t->marked, INLINEBIT) && t->node == inlinenodes(t)))
     luaM_freearray(L, t->node, sizenode(t), Node);
   luaM_freearray(L, t->array, t->sizearray, TValue);
-  luaM_free(L, t);
+  luaM_freemem(L, t, size);
 }
 
 
