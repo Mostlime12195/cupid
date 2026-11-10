@@ -1,5 +1,5 @@
 // Runs bench.lua several times and prints the median of each benchmark with
-// the JIT on and off: node bench.mjs [runs] [--jit-only]
+// the JIT on and off: node bench.mjs [runs] [--jit-only] [--runner run.mjs]
 import { execFileSync } from 'node:child_process';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -8,11 +8,13 @@ const here = dirname(fileURLToPath(import.meta.url));
 const args = process.argv.slice(2);
 const runs = Number(args.find((a) => /^\d+$/.test(a)) || 5);
 const jitOnly = args.includes('--jit-only');
+// --runner path/to/run.mjs: another build's runner (to compare builds on this bench.lua)
+const runner = args.includes('--runner') ? args[args.indexOf('--runner') + 1] : join(here, 'run.mjs');
 
 function measure(flags) {
   const results = {};
   for (let r = 0; r < runs; r++) {
-    const out = execFileSync('node', [join(here, 'run.mjs'), ...flags, join(here, 'bench.lua')], { encoding: 'utf8' });
+    const out = execFileSync('node', [runner, ...flags, join(here, 'bench.lua')], { encoding: 'utf8' });
     for (const line of out.split('\n')) {
       const m = line.match(/^(.*?)\s+([\d.]+) ms$/);
       if (m) (results[m[1]] ||= []).push(Number(m[2]));

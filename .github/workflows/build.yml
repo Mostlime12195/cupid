@@ -1,0 +1,103 @@
+# Builds branches without publishing them: the engine (dist/ as an artifact,
+# with its sizes in the job summary), a build that keeps function names for
+# profiling, and the Lua JIT's tests and benchmark against main.
+name: Build
+
+on:
+  push:
+    branches-ignore: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  EMSDK_VERSION: 6.0.13
+
+jobs:
+  jit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/cache/restore@v4
+        with:
+          path: ~/emsdk
+          key: emsdk-${{ env.EMSDK_VERSION }}-${{ runner.os }}
+
+      - name: Install Emscripten
+        run: |
+          [ -d ~/emsdk ] || git clone --depth 1 https://github.com/emscripten-core/emsdk.git ~/emsdk
+          ~/emsdk/emsdk install $EMSDK_VERSION
+          ~/emsdk/emsdk activate $EMSDK_VERSION
+
+      - name: Build the interpreter for Node (this branch and main)
+        run: |
+          source ~/emsdk/emsdk_env.sh
+          sh tools/jit/build-node.sh
+          git fetch --depth 1 origin main
+          git worktree add ../main FETCH_HEAD
+          sh ../main/tools/jit/build-node.sh
+
+      - name: JIT tests
+        run: |
+          source ~/emsdk/emsdk_env.sh
+          bash tools/jit/test.sh
+
+      - name: Benchmark
+        run: |
+          source ~/emsdk/emsdk_env.sh
+          {
+            echo '### Lua benchmark (median of 7, ms)'
+            echo '```'
+            echo "main:"; node tools/jit/bench.mjs 7 --runner ../main/tools/jit/run.mjs
+            echo; echo "this branch:"; node tools/jit/bench.mjs 7
+            echo; echo "main again:"; node tools/jit/bench.mjs 7 --jit-only --runner ../main/tools/jit/run.mjs
+            echo; echo "this branch again:"; node tools/jit/bench.mjs 7 --jit-only
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/cache/restore@v4
+        with:
+          path: ~/emsdk
+          key: emsdk-${{ env.EMSDK_VERSION }}-${{ runner.os }}
+
+      - name: Install Emscripten
+        run: |
+          [ -d ~/emsdk ] || git clone --depth 1 https://github.com/emscripten-core/emsdk.git ~/emsdk
+          ~/emsdk/emsdk install $EMSDK_VERSION
+          ~/emsdk/emsdk activate $EMSDK_VERSION
+
+      - name: Build
+        run: |
+          source ~/emsdk/emsdk_env.sh
+          python3 build.py
+
+      - name: Sizes
+        run: python3 tools/sizes.py dist | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist
+          retention-days: 14
+
+      - name: Build with function names
+        run: |
+          source ~/emsdk/emsdk_env.sh
+          python3 build.py --profiling
+          python3 tools/sizes.py build/profiling --functions | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: profiling
+          path: build/profiling
+          retention-days: 14

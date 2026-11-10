@@ -1,5 +1,7 @@
 // Runs a Lua script on the Node build: node run.mjs [--nojit] [--threshold N] script.lua [args]
-import createLua from '../../build/jit-node/lua.mjs';
+// LUA_BUILD: another build of the interpreter (see build-node.sh).
+const { default: createLua } = await import(process.env.LUA_BUILD
+  ? new URL(process.env.LUA_BUILD, `file://${process.cwd()}/`).href : '../../build/jit-node/lua.mjs');
 
 const args = process.argv.slice(2);
 let enabled = 1, threshold = 1, stats = false;
