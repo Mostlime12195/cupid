@@ -7,9 +7,17 @@
 //                                    opened from a click; call ok() inside
 //                                    the click handler, or cancel()
 //   loveDownloadFile(name, bytes)    replaces the default <a download>
+//   onLoveWindowMode(fullscreen)     the game set its window mode (setMode,
+//                                    setFullscreen); fullscreen is what it
+//                                    asked for. Fullscreen and borderless
+//                                    windows fill the page like resizable ones.
 addToLibrary({
   loveweb_on_quit: (code, restart) => {
     if (Module.onLoveQuit) Module.onLoveQuit(code, !!restart);
+  },
+
+  loveweb_window_mode_changed: (fullscreen) => {
+    if (Module.onLoveWindowMode) Module.onLoveWindowMode(!!fullscreen);
   },
 
   // ---------------------------------------------------------------------------

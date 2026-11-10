@@ -143,7 +143,8 @@ function fitCanvas() {
   const sh = window.innerHeight;
 
   // Resizable games get the whole page, like a maximized desktop window
-  // (they receive love.resize). Fixed-size games are scaled to fit.
+  // (they receive love.resize). So do fullscreen and borderless ones: the
+  // page is their screen. Fixed-size games are scaled to fit.
   if (running && Module?._loveweb_fit_window?.(sw, sh)) {
     canvas.style.setProperty('--fit-w', `${sw}px`);
     canvas.style.setProperty('--fit-h', `${sh}px`);
@@ -169,6 +170,34 @@ $('#btn-fullscreen').addEventListener('click', () => {
   if (document.fullscreenElement) document.exitFullscreen();
   else document.documentElement.requestFullscreen?.();
   canvas.focus();
+});
+
+// The game set its window mode. Its window fills the page either way when
+// it asks for fullscreen; if it asks just after a click or key press (from
+// its options menu, say), the page also goes fullscreen, like the toolbar
+// button. Browsers refuse that without one, so a game that starts in
+// fullscreen only fills the page. Leaving fullscreen only exits the page's
+// fullscreen if the game entered it. The embedded player never does this.
+let gameFullscreen = false;
+let gameEnteredFullscreen = false;
+
+function onWindowMode(fullscreen) {
+  // After the engine has finished changing the window.
+  queueMicrotask(fitCanvas);
+  if (fullscreen === gameFullscreen) return;
+  gameFullscreen = fullscreen;
+  if (embedded) return;
+  const root = document.documentElement;
+  if (fullscreen) {
+    if (!document.fullscreenElement && navigator.userActivation?.isActive && root.requestFullscreen)
+      root.requestFullscreen().then(() => { gameEnteredFullscreen = true; }, () => {});
+  } else if (gameEnteredFullscreen && document.fullscreenElement) {
+    document.exitFullscreen().catch(() => {});
+  }
+}
+
+document.addEventListener('fullscreenchange', () => {
+  if (!document.fullscreenElement) gameEnteredFullscreen = false;
 });
 
 // ---------------------------------------------------------------------------
@@ -269,6 +298,7 @@ const engineReady = createLove({
   print: (t) => output('out', t),
   printErr: (t) => output('err', t),
   onLoveQuit: (code) => onQuit(code),
+  onLoveWindowMode: onWindowMode,
   loveRequestGesture: requestGesture,
   onAbort: (what) => fail(`The engine crashed: ${what}`),
 }).then((M) => {

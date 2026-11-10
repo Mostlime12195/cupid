@@ -174,6 +174,18 @@ private:
 	bool canUseDwmFlush = false;
 #endif
 
+#ifdef LOVE_EMSCRIPTEN
+	// What the game asked for. In a browser, fullscreen and borderless
+	// windows fill the page like resizable ones, so SDL never gets the
+	// fullscreen flag and its resizable flag can differ from these.
+	bool webFullscreen = false;
+	bool webResizable = false;
+	bool webBorderless = false;
+	// The size the game last gave setMode, for when it leaves fullscreen.
+	int webWindowedWidth = 800;
+	int webWindowedHeight = 600;
+#endif
+
 	bool open;
 
 	bool mouseGrabbed;

@@ -55,6 +55,20 @@ void loveweb_show_file_dialog(void *state, int type, const char *title,
                               const char *acceptlabel, const char *cancellabel,
                               const char *defaultname, const char *const *filters,
                               int nfilters, int multiselect);
+void loveweb_window_mode_changed(int fullscreen);
+}
+
+// The page's viewport in CSS pixels. In a browser this is the "desktop": the
+// most room a game's window can have.
+static void getWebPageSize(int &width, int &height)
+{
+	width = EM_ASM_INT({ return window.innerWidth | 0; });
+	height = EM_ASM_INT({ return window.innerHeight | 0; });
+	if (width <= 0 || height <= 0)
+	{
+		width = 800;
+		height = 600;
+	}
 }
 #endif
 
@@ -520,9 +534,13 @@ bool Window::setWindow(int width, int height, WindowSettings *settings)
 	// Use the desktop resolution if a width or height of 0 is specified.
 	if (width == 0 || height == 0)
 	{
+#ifdef LOVE_EMSCRIPTEN
+		getWebPageSize(width, height);
+#else
 		const SDL_DisplayMode *mode = SDL_GetDesktopDisplayMode(displays.ids[f.displayindex]);
 		width = mode->w;
 		height = mode->h;
+#endif
 	}
 
 	// On Android, disable fullscreen first on window creation so it's
@@ -536,6 +554,25 @@ bool Window::setWindow(int width, int height, WindowSettings *settings)
 
 	f.fullscreen = false;
 	f.fstype = FULLSCREEN_DESKTOP;
+#endif
+
+#ifdef LOVE_EMSCRIPTEN
+	// In a browser, fullscreen (either type) and borderless windows fill the
+	// page and follow its size, like resizable ones: player.js keeps them
+	// fitted through loveweb_fit_window. SDL's fullscreen would snap the
+	// window to the screen size instead, which isn't the page size.
+	// getMode still reports what the game asked for.
+	webFullscreen = f.fullscreen;
+	webResizable = f.resizable;
+	webBorderless = f.borderless;
+	webWindowedWidth = width;
+	webWindowedHeight = height;
+	if (f.fullscreen || f.borderless)
+	{
+		getWebPageSize(width, height);
+		f.resizable = true;
+	}
+	f.fullscreen = false;
 #endif
 
 	int x = f.x;
@@ -603,8 +640,13 @@ bool Window::setWindow(int width, int height, WindowSettings *settings)
 		// TODO: should we make this conditional, to avoid love.resize events when the size doesn't change?
 		SDL_SetWindowSize(window, width, height);
 
+#ifdef LOVE_EMSCRIPTEN
+		// settings.resizable is what the game asked for, not SDL's flag.
+		SDL_SetWindowResizable(window, f.resizable);
+#else
 		if (this->settings.resizable != f.resizable)
 			SDL_SetWindowResizable(window, f.resizable);
+#endif
 
 		if (this->settings.borderless != f.borderless)
 			SDL_SetWindowBordered(window, !f.borderless);
@@ -718,6 +760,10 @@ bool Window::setWindow(int width, int height, WindowSettings *settings)
 
 	SDL_SyncWindow(window);
 
+#ifdef LOVE_EMSCRIPTEN
+	loveweb_window_mode_changed(webFullscreen ? 1 : 0);
+#endif
+
 	return true;
 }
 
@@ -778,12 +824,22 @@ void Window::updateSettings(const WindowSettings &newsettings, bool updateGraphi
 	settings.fullscreen = love::android::getImmersive();
 #endif
 
+#ifdef LOVE_EMSCRIPTEN
+	// See setWindow: SDL's flags aren't what the game asked for.
+	settings.fullscreen = webFullscreen;
+	settings.fstype = newsettings.fstype;
+#endif
+
 	// SDL_GetWindowMinimumSize gives back 0,0 sometimes...
 	settings.minwidth = newsettings.minwidth;
 	settings.minheight = newsettings.minheight;
 
 	settings.resizable = (wflags & SDL_WINDOW_RESIZABLE) != 0;
 	settings.borderless = (wflags & SDL_WINDOW_BORDERLESS) != 0;
+#ifdef LOVE_EMSCRIPTEN
+	settings.resizable = webResizable;
+	settings.borderless = webBorderless;
+#endif
 	settings.centered = newsettings.centered;
 
 	getPosition(settings.x, settings.y, settings.displayindex);
@@ -877,6 +933,25 @@ bool Window::setFullscreen(bool fullscreen, FullscreenType fstype)
 	newsettings.fullscreen = fullscreen;
 	newsettings.fstype = fstype;
 
+#ifdef LOVE_EMSCRIPTEN
+	// See setWindow: fullscreen fills the page. Leaving it gives back the
+	// size the game last set, unless the window is resizable (then it
+	// keeps filling the page).
+	webFullscreen = fullscreen;
+	bool fill = fullscreen || webBorderless;
+	SDL_SetWindowResizable(window, fill || webResizable);
+	int w = webWindowedWidth;
+	int h = webWindowedHeight;
+	if (fill)
+		getWebPageSize(w, h);
+	if (fill || !webResizable)
+		SDL_SetWindowSize(window, w, h);
+	SDL_SyncWindow(window);
+	updateSettings(newsettings, true);
+	loveweb_window_mode_changed(fullscreen ? 1 : 0);
+	return true;
+#endif
+
 	if (fullscreen)
 	{
 		if (fstype == FULLSCREEN_DESKTOP)
@@ -964,14 +1039,21 @@ std::vector<Window::DisplayMode> Window::getFullscreenModes(int displayindex) co
 
 	SDL_free(modes);
 
+#ifdef LOVE_EMSCRIPTEN
+	// Fullscreen in a browser fills the page, so its size is the only mode.
+	sizes.clear();
+#endif
+
 	// Browsers have no fullscreen mode list, so SDL returns none. LÖVE 11
 	// games (for example ones that list resolutions in their options) expect
 	// at least one entry, so give the desktop size.
 	if (sizes.empty())
 	{
+		int w = 0, h = 0;
+		getDesktopDimensions(displayindex, w, h);
 		const SDL_DisplayMode *dmode = SDL_GetDesktopDisplayMode(GetSDLDisplayIDForIndex(displayindex));
-		if (dmode != nullptr && dmode->w > 0 && dmode->h > 0)
-			sizes.push_back({dmode->w, dmode->h, (double)dmode->refresh_rate});
+		if (w > 0 && h > 0)
+			sizes.push_back({w, h, dmode != nullptr ? (double)dmode->refresh_rate : 0.0});
 	}
 
 	return sizes;
@@ -979,6 +1061,15 @@ std::vector<Window::DisplayMode> Window::getFullscreenModes(int displayindex) co
 
 void Window::getDesktopDimensions(int displayindex, int &width, int &height) const
 {
+#ifdef LOVE_EMSCRIPTEN
+	// The page, not the screen: games use this as the size of a fullscreen
+	// window, and in a browser that fills the page.
+	if (displayindex >= 0 && displayindex < getDisplayCount())
+	{
+		getWebPageSize(width, height);
+		return;
+	}
+#endif
 	const SDL_DisplayMode *mode = SDL_GetDesktopDisplayMode(GetSDLDisplayIDForIndex(displayindex));
 	if (mode != nullptr)
 	{

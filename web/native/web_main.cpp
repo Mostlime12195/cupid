@@ -302,7 +302,8 @@ EMSCRIPTEN_KEEPALIVE void loveweb_set_paused(int p)
 }
 
 // Resizes a resizable game window to fill the page, like a maximized desktop
-// window. Returns 0 (and does nothing) if the game's window isn't resizable.
+// window. Fullscreen and borderless windows are resizable to SDL too (see
+// Window::setWindow). Returns 0 (and does nothing) if the window isn't.
 EMSCRIPTEN_KEEPALIVE int loveweb_fit_window(int w, int h)
 {
 	SDL_Window *window = SDL_GL_GetCurrentWindow();
