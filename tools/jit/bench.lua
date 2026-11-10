@@ -119,3 +119,12 @@ bench("collisions 300", function()
     end
   end
 end)
+bench("math calls 300k", function()
+  -- math functions through upvalues and through the math table.
+  local floor, sqrt, abs, min, max = math.floor, math.sqrt, math.abs, math.min, math.max
+  local s = 0
+  for i = 1, 300000 do
+    local x = i * 0.37
+    s = s + floor(x) % 7 + sqrt(x) + abs(x - 500) + min(x, 100) + max(x, 3) + math.floor(x / 3)
+  end
+end)

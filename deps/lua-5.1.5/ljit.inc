@@ -533,6 +533,7 @@ enum {
   W_F64_EQ = 0x61, W_F64_LT = 0x63, W_F64_GT = 0x64, W_F64_LE = 0x65,
   W_I32_ADD = 0x6a, W_I32_SUB = 0x6b, W_I32_AND = 0x71, W_I32_OR = 0x72,
   W_I32_SHR_U = 0x76, W_F64_NEG = 0x9a, W_F64_FLOOR = 0x9c,
+  W_F64_ABS = 0x99, W_F64_CEIL = 0x9b, W_F64_SQRT = 0x9f, W_SELECT = 0x1b,
   W_I32_STORE8 = 0x3a, W_I32_LT_U = 0x49, W_I32_GE_U = 0x4f,
   W_I32_MUL = 0x6c, W_I32_SHL = 0x74, W_F64_CONVERT_I32_S = 0xb7,
   W_PREFIX_FC = 0xfc, W_FC_I32_TRUNC_SAT_F64_S = 0x02,
@@ -571,6 +572,8 @@ enum { V_L = 0, V_BASE, V_IDX, V_T, V_R, V_TAB, V_S, V_E, V_D1, V_D2 };
 #define T_NODE    ((int)offsetof(Table, node))
 #define T_SIZEARRAY ((int)offsetof(Table, sizearray))
 #define LCL_UPVALS ((int)offsetof(LClosure, upvals))
+#define CCL_ISC    ((int)offsetof(CClosure, isC))
+#define CCL_F      ((int)offsetof(CClosure, f))
 #define UV_V      ((int)offsetof(UpVal, v))
 #define N_SIZE    ((int)sizeof(Node))
 #define N_KEYVAL  ((int)offsetof(Node, i_key.nk.value))
@@ -621,6 +624,7 @@ static int rs_or (RegSet *d, const RegSet *s) {
 typedef struct Compiler {
   Buf code;
   Proto *p;
+  LClosure *cl;  /* a closure of p (the one running), or NULL */
   int n;      /* number of instructions */
   int pcidx;  /* instruction being compiled */
   int depth;  /* blocks opened inside the current instruction */
@@ -1735,6 +1739,140 @@ static void analyze (Compiler *cc) {
   }
 }
 
+/* ------------------------------------------------------------------------
+** Calls of math functions
+**
+** math.floor, ceil, sqrt and abs of one number, and math.min and max of
+** two, are single WebAssembly instructions. A call that looks like one of
+** them (by the name of the field or local variable the function was read
+** from, or the value of the upvalue it came from as this is compiled)
+** checks that the function
+** being called really is that C function, that the arguments are numbers
+** and that no hook is set, then computes the result in place; otherwise it
+** makes the call as usual.
+** --------------------------------------------------------------------- */
+
+enum {
+  LJIT_MATH_NONE, LJIT_MATH_FLOOR, LJIT_MATH_CEIL, LJIT_MATH_SQRT,
+  LJIT_MATH_ABS, LJIT_MATH_MIN, LJIT_MATH_MAX, LJIT_MATH_COUNT
+};
+
+/* In lmathlib.c. */
+extern lua_CFunction ljit_mathfn (int which);
+
+static int math_by_cname (const char *name) {
+  static const char *const names[] = { "", "floor", "ceil", "sqrt", "abs", "min", "max" };
+  int m;
+  for (m = 1; m < LJIT_MATH_COUNT; m++)
+    if (strcmp(name, names[m]) == 0) return m;
+  return LJIT_MATH_NONE;
+}
+
+static int math_by_name (const TValue *name) {
+  return ttisstring(name) ? math_by_cname(svalue(name)) : LJIT_MATH_NONE;
+}
+
+static int math_by_value (const TValue *v) {
+  int m;
+  if (!ttisfunction(v) || !clvalue(v)->c.isC) return LJIT_MATH_NONE;
+  for (m = 1; m < LJIT_MATH_COUNT; m++)
+    if (clvalue(v)->c.f == ljit_mathfn(m)) return m;
+  return LJIT_MATH_NONE;
+}
+
+/* The math function OP_CALL at k probably calls, or LJIT_MATH_NONE. */
+static int math_call (Compiler *cc, int k) {
+  Proto *p = cc->p;
+  Instruction i = p->code[k];
+  int a = GETARG_A(i), nargs = GETARG_B(i) - 1;
+  int j, m = LJIT_MATH_NONE;
+  if (GETARG_C(i) != 2 || (nargs != 1 && nargs != 2)) return LJIT_MATH_NONE;
+  /* the instruction that put the function in register a */
+  for (j = k - 1; j >= 0 && j >= k - 8; j--) {
+    Instruction d = p->code[j];
+    OpCode o = GET_OPCODE(d);
+    if (o == OP_JMP || o == OP_CALL || o == OP_TAILCALL || o == OP_RETURN ||
+        o == OP_FORLOOP || o == OP_FORPREP || o == OP_TFORLOOP ||
+        o == OP_CLOSURE || o == OP_SETLIST || o == OP_LOADBOOL ||
+        o == OP_EQ || o == OP_LT || o == OP_LE || o == OP_TEST ||
+        o == OP_TESTSET || o == OP_VARARG || o == OP_LOADNIL ||
+        o == OP_SELF || o == OP_CONCAT)
+      return LJIT_MATH_NONE;
+    if (GETARG_A(d) != a) continue;
+    if (o == OP_GETTABLE && ISK(GETARG_C(d)))
+      m = math_by_name(&p->k[INDEXK(GETARG_C(d))]);
+    else if (o == OP_GETGLOBAL)
+      m = math_by_name(&p->k[GETARG_Bx(d)]);
+    else if (o == OP_GETUPVAL && cc->cl != NULL && GETARG_B(d) < cc->cl->nupvalues)
+      m = math_by_value(cc->cl->upvals[GETARG_B(d)]->v);
+    else if (o == OP_MOVE) {  /* a local: `local floor = math.floor` */
+      const char *name = luaF_getlocalname(p, GETARG_B(d) + 1, j);
+      if (name != NULL) m = math_by_cname(name);
+    }
+    break;
+  }
+  if (m == LJIT_MATH_NONE) return m;
+  if ((m == LJIT_MATH_MIN || m == LJIT_MATH_MAX) != (nargs == 2)) return LJIT_MATH_NONE;
+  return m;
+}
+
+/* The fast path of a call of math function m at the current instruction:
+** leaves through the block opened here (label 0) when a check fails, and
+** through the one around it (label 1) with the result in register a. */
+static void math_inline (Compiler *cc, int m) {
+  int a = GETARG_A(cc->p->code[cc->pcidx]);
+  int nargs = (m == LJIT_MATH_MIN || m == LJIT_MATH_MAX) ? 2 : 1;
+  int j;
+  block(cc, W_BLOCK, W_VOID);
+  /* register a is a function... */
+  lget(cc, V_BASE);
+  mem(cc, W_I32_LOAD, 2, reg(a) + TV_TT);
+  i32c(cc, LUA_TFUNCTION);
+  op(cc, W_I32_NE);
+  b_byte(C, W_BR_IF); b_u32(C, 0);
+  /* ...a C function... */
+  lget(cc, V_BASE);
+  mem(cc, W_I32_LOAD, 2, reg(a) + TV_VALUE);
+  ltee(cc, V_T);
+  mem(cc, W_I32_LOAD8_U, 0, CCL_ISC);
+  op(cc, W_I32_EQZ);
+  b_byte(C, W_BR_IF); b_u32(C, 0);
+  /* ...this one */
+  lget(cc, V_T);
+  mem(cc, W_I32_LOAD, 2, CCL_F);
+  i32c(cc, (int)(size_t)ljit_mathfn(m));
+  op(cc, W_I32_NE);
+  b_byte(C, W_BR_IF); b_u32(C, 0);
+  /* no hook wants to see the call */
+  lget(cc, V_L);
+  mem(cc, W_I32_LOAD8_U, 0, L_HOOKMASK);
+  b_byte(C, W_BR_IF); b_u32(C, 0);
+  /* the arguments are numbers */
+  for (j = 1; j <= nargs; j++) {
+    if (known(cc, a + j)) continue;
+    not_number(cc, a + j);
+    b_byte(C, W_BR_IF); b_u32(C, 0);
+  }
+  switch (m) {
+    case LJIT_MATH_FLOOR: load_num(cc, a + 1); op(cc, W_F64_FLOOR); break;
+    case LJIT_MATH_CEIL: load_num(cc, a + 1); op(cc, W_F64_CEIL); break;
+    case LJIT_MATH_SQRT: load_num(cc, a + 1); op(cc, W_F64_SQRT); break;
+    case LJIT_MATH_ABS: load_num(cc, a + 1); op(cc, W_F64_ABS); break;
+    default:  /* min: y < x ? y : x; max: y > x ? y : x (as lmathlib.c) */
+      load_num(cc, a + 2);
+      load_num(cc, a + 1);
+      load_num(cc, a + 2);
+      load_num(cc, a + 1);
+      op(cc, m == LJIT_MATH_MIN ? W_F64_LT : W_F64_GT);
+      op(cc, W_SELECT);
+      break;
+  }
+  lset(cc, V_D1);
+  store_num(cc, a, V_D1);
+  b_byte(C, W_BR); b_u32(C, 1);
+  end(cc);
+}
+
 static void instruction (Compiler *cc) {
   Proto *p = cc->p;
   int pcidx = cc->pcidx;
@@ -1896,12 +2034,19 @@ static void instruction (Compiler *cc) {
       jump(cc, pcidx + 2);
       break;
     }
-    case OP_CALL:
+    case OP_CALL: {
+      int m = math_call(cc, pcidx);
+      if (m != LJIT_MATH_NONE) {
+        block(cc, W_BLOCK, W_VOID);
+        math_inline(cc, m);
+      }
       call_helper(cc, H_CALL);
       return_if_nonzero(cc);
       reload_base(cc);
       reestablish(cc, pcidx + 1);
+      if (m != LJIT_MATH_NONE) end(cc);
       break;
+    }
     case OP_TAILCALL:
       call_helper(cc, H_TAILCALL);
       return_if_nonzero(cc);
@@ -2287,6 +2432,9 @@ int ljit_compile (lua_State *L, Proto *p) {
 
   memset(&cc, 0, sizeof(cc));
   cc.p = p;
+  if (ttisfunction(L->ci->func) && !clvalue(L->ci->func)->c.isC &&
+      clvalue(L->ci->func)->l.p == p)
+    cc.cl = &clvalue(L->ci->func)->l;
   cc.indexname = G(L)->tmname[TM_INDEX];
   cc.n = p->sizecode;
   cc.spec = p->jitdeopts < LJIT_MAX_DEOPTS && p->maxstacksize <= LJIT_MAXREGS;

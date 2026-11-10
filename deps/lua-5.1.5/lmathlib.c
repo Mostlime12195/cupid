@@ -220,6 +220,20 @@ static int math_randomseed (lua_State *L) {
 }
 
 
+/* LÖVE web: the functions the JIT compiles calls of into WebAssembly
+** instructions (ljit.inc); `which` is its LJIT_MATH_ number. */
+lua_CFunction ljit_mathfn (int which) {
+  switch (which) {
+    case 1: return math_floor;
+    case 2: return math_ceil;
+    case 3: return math_sqrt;
+    case 4: return math_abs;
+    case 5: return math_min;
+    case 6: return math_max;
+    default: return NULL;
+  }
+}
+
 static const luaL_Reg mathlib[] = {
   {"abs",   math_abs},
   {"acos",  math_acos},
